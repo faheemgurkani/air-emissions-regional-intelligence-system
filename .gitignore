@@ -1,0 +1,53 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+env/
+
+# Environment / secrets
+.env
+.env.*
+
+# Test, coverage, notebooks
+.pytest_cache/
+.coverage*
+htmlcov/
+.ipynb_checkpoints/
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data/cache directories
+static/outputs/
+
+# Large data files (remote products)
+# *.nc
+# *.nc4
+# *.h5
+# *.hdf5
+
+# Logs and temp
+*.log
+*.tmp
+
+# Matplotlib / Cartopy caches
+.matplotlib/
+.cartopy/
+

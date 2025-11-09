@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Results - TEMPO Pollution Viewer</title>
+    <style>
+        body { background: #fff; color: #000; font-family: Arial, Helvetica, sans-serif; }
+        .container { max-width: 1080px; margin: 24px auto; padding: 0 16px; }
+        h1 { font-size: 22px; border-bottom: 2px solid #000; padding-bottom: 8px; }
+        .meta { margin: 12px 0; padding: 12px; border: 1px solid #000; }
+        .grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 16px; }
+        .panel { border: 1px solid #000; padding: 12px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 1px solid #000; padding: 6px; font-size: 13px; }
+        .badge { display: inline-block; padding: 2px 6px; border: 1px solid #000; margin-left: 6px; }
+        a.button { display: inline-block; padding: 8px 12px; background: #000; color: #fff; text-decoration: none; border: 1px solid #000; }
+        .small { font-size: 12px; color: #000; }
+        #map { width: 100%; height: 420px; border: 1px solid #000; }
+    </style>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Results - TEMPO Pollution Viewer</h1>
+        <div class="meta">
+            <div><strong>Location:</strong> {{ location }} <span class="small">({{ coords.lat }}, {{ coords.lon }})</span></div>
+            <div><strong>Radius:</strong> {{ radius }}°</div>
+            <div><strong>Gases:</strong> {{ ", ".join(gases) }}</div>
+            <div><strong>Overall status:</strong> {{ overall_status }}</div>
+            {% if weather_data %}
+            <div class="weather-info">
+                <strong>Weather:</strong> {{ weather_data.current.temp_c }}°C ({{ weather_data.current.temp_f }}°F), {{ weather_data.current.condition.text }}, Wind: {{ weather_data.current.wind_kph }} km/h ({{ weather_data.current.wind_mph }} mph) from {{ weather_data.current.wind_dir }}
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="grid">
+            <div class="panel">
+                {% if image_url %}
+                <img src="{{ image_url }}" alt="Analysis plot" style="width:100%; border:1px solid #000;">
+                {% else %}
+                <div>No image available.</div>
+                {% endif %}
+
+                {% if per_gas_images %}
+                <div style="margin-top:12px;">
+                    <h3>Per-gas Tripanel Figures</h3>
+                    {% for pg in per_gas_images %}
+                        <div style="margin:8px 0; border:1px solid #000; padding:6px;">
+                            <div><strong>{{ pg.gas }}</strong></div>
+                            <img src="{{ pg.url }}" alt="{{ pg.gas }} tripanel" style="width:100%; border:1px solid #000;">
+                        </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+            <div class="panel">
+                <h3>Regional Alerts</h3>
+                {% if alerts %}
+                <table>
+                    <thead>
+                        <tr><th>Gas</th><th>Level</th><th>Max</th><th>Mean</th><th>N</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for a in alerts %}
+                        <tr>
+                            <td>{{ a.gas }}</td>
+                            <td>{{ a.level }}</td>
+                            <td>{{ '%.2e'|format(a.max_value) }} {{ units[a.gas] }}</td>
+                            <td>{{ '%.2e'|format(a.mean_value) }} {{ units[a.gas] }}</td>
+                            <td>{{ a.num_pixels }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div>No alerts.</div>
+                {% endif %}
+
+                <h3 style="margin-top:16px;">Top Hotspots</h3>
+                {% if hotspots %}
+                <table>
+                    <thead>
+                        <tr><th>#</th><th>Gas</th><th>Level</th><th>Center (lat, lon)</th><th>Area (km²)</th><th>Max</th><th>Place</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for h in hotspots %}
+                        <tr>
+                            <td>{{ loop.index }}</td>
+                            <td>{{ h.gas }}</td>
+                            <td>{{ h.level }}</td>
+                            <td>{{ '%.4f'|format(h.center_lat) }}, {{ '%.4f'|format(h.center_lon) }}</td>
+                            <td>{{ '%.1f'|format(h.area_km2) }}</td>
+                            <td>{{ '%.2e'|format(h.max_value) }} {{ units[h.gas] }}</td>
+                            <td>{{ h.place if h.place else '-' }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div>No hotspots detected.</div>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if weather_data %}
+        <div class="panel" style="margin-top:16px;">
+            <h3>Current Weather Conditions for {{ weather_data.location.name }}</h3>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+                <div>
+                    <h4>Current Conditions</h4>
+                    <table style="width: 100%;">
+                        <tr><td><strong>Temperature:</strong></td><td>{{ weather_data.current.temp_c }}°C ({{ weather_data.current.temp_f }}°F)</td></tr>
+                        <tr><td><strong>Humidity:</strong></td><td>{{ weather_data.current.humidity }}%</td></tr>
+                        <tr><td><strong>Wind Speed:</strong></td><td>{{ weather_data.current.wind_kph }} km/h ({{ weather_data.current.wind_mph }} mph)</td></tr>
+                        <tr><td><strong>Wind Direction:</strong></td><td>{{ weather_data.current.wind_degree }}° ({{ weather_data.current.wind_dir }})</td></tr>
+                        <tr><td><strong>Condition:</strong></td><td>{{ weather_data.current.condition.text }}</td></tr>
+                        <tr><td><strong>Visibility:</strong></td><td>{{ weather_data.current.vis_km }} km</td></tr>
+                    </table>
+                </div>
+                {% if weather_data.air_quality %}
+                <div>
+                    <h4>Air Quality Index</h4>
+                    <table style="width: 100%;">
+                        <tr><td><strong>CO:</strong></td><td>{{ weather_data.air_quality.co }} μg/m³</td></tr>
+                        <tr><td><strong>NO2:</strong></td><td>{{ weather_data.air_quality.no2 }} μg/m³</td></tr>
+                        <tr><td><strong>O3:</strong></td><td>{{ weather_data.air_quality.o3 }} μg/m³</td></tr>
+                        <tr><td><strong>PM2.5:</strong></td><td>{{ weather_data.air_quality.pm2_5 }} μg/m³</td></tr>
+                        <tr><td><strong>PM10:</strong></td><td>{{ weather_data.air_quality.pm10 }} μg/m³</td></tr>
+                        <tr><td><strong>EPA Index:</strong></td><td>{{ weather_data.air_quality['us-epa-index'] }}/5</td></tr>
+                    </table>
+                </div>
+                {% endif %}
+            </div>
+            
+            {% if weather_interpretation %}
+            <div style="background: #f8f9fa; border-left: 4px solid #000; padding: 16px; margin: 16px 0;">
+                <h4 style="margin-top: 0; color: #000;">Current Weather and Air Quality Assessment</h4>
+                <div style="white-space: pre-line; line-height: 1.6;">{{ weather_interpretation }}</div>
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+        
+        {% if pollutant_predictions %}
+        <div class="panel" style="margin-top:16px;">
+            <h3>Pollutant Movement Prediction (Next 3 Hours)</h3>
+            
+            <div style="display: grid; gap: 16px; margin-bottom: 20px;">
+                {% for pred in pollutant_predictions %}
+                <div style="border: 1px solid #ddd; padding: 16px; background: #fafafa;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 12px;">
+                        <div><strong>Time:</strong><br>{{ pred.time }}</div>
+                        <div><strong>Wind:</strong><br>{{ pred.wind_kph }} km/h ({{ pred.wind_dir_deg }}°)</div>
+                        <div><strong>Movement:</strong><br>{{ "%.1f"|format(pred.displacement_km.dx) }} km E/W, {{ "%.1f"|format(pred.displacement_km.dy) }} km N/S</div>
+                    </div>
+                    <div>
+                        <strong>Predicted Air Quality:</strong>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; margin-top: 8px;">
+                            {% for pollutant, value in pred.predicted_air_quality.items() %}
+                            <div style="border: 1px solid #ccc; padding: 8px; text-align: center; background: white;">
+                                <strong>{{ pollutant }}</strong><br>{{ "%.1f"|format(value) }} μg/m³
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            
+            {% if prediction_interpretation %}
+            <div style="background: #f8f9fa; border-left: 4px solid #000; padding: 16px; margin: 16px 0;">
+                <h4 style="margin-top: 0; color: #000;">Pollutant Movement Prediction (Next 3 Hours)</h4>
+                <div style="white-space: pre-line; line-height: 1.6;">{{ prediction_interpretation }}</div>
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <div class="panel" style="margin-top:16px;">
+            <h3>Realtime Hotspots Map</h3>
+            <div id="map"></div>
+        </div>
+
+        <div style="margin-top:16px;">
+            <a href="/" class="button">Back</a>
+        </div>
+    </div>
+
+    <script>
+        const center = [{{ coords.lat }}, {{ coords.lon }}];
+        const radius = {{ radius }};
+        const gases = '{{ ",".join(gases) }}';
+        const locationName = encodeURIComponent('{{ location }}');
+
+        const map = L.map('map').setView(center, 9);
+        const tiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 18,
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        function colorForLevel(level) {
+            switch (level) {
+                case 'hazardous': return '#8E44AD'; // purple
+                case 'very_unhealthy': return '#E74C3C'; // red
+                case 'unhealthy': return '#E67E22'; // orange
+                case 'moderate': return '#F1C40F'; // yellow
+                default: return '#2ECC71'; // green (good/unknown)
+            }
+        }
+
+        function severityIndex(level) {
+            if (level === 'hazardous') return 4;
+            if (level === 'very_unhealthy') return 3;
+            if (level === 'unhealthy') return 2;
+            if (level === 'moderate') return 1;
+            return 0;
+        }
+
+        const hotspotLayer = L.geoJSON(null, {
+            pointToLayer: function (feature, latlng) {
+                const p = feature.properties || {};
+                const color = colorForLevel(p.level);
+                const radiusMeters = (p.radius_km || 5) * 1000;
+                return L.circle(latlng, { radius: radiusMeters, color, fillColor: color, fillOpacity: 0.25, weight: 1 });
+            },
+            onEachFeature: function (feature, layer) {
+                const p = feature.properties || {};
+                const maxv = p.max_value ? Number(p.max_value).toExponential(2) : 'n/a';
+                const meanv = p.mean_value ? Number(p.mean_value).toExponential(2) : 'n/a';
+                layer.bindPopup(`<b>${p.gas}</b><br>Level: ${p.level}<br>Max: ${maxv}<br>Mean: ${meanv}<br>Area: ${p.area_km2?.toFixed ? p.area_km2.toFixed(1) : p.area_km2} km²`);
+            }
+        }).addTo(map);
+
+        const centerMarker = L.marker(center).addTo(map).bindPopup('Center: {{ location }}');
+        const circle = L.circle(center, { radius: radius * 111000, color: '#000', fill: false, weight: 1, dashArray: '5,5' }).addTo(map);
+
+        async function refreshHotspots() {
+            try {
+                const url = `/api/hotspots?location=${locationName}&latitude=${center[0]}&longitude=${center[1]}&radius=${radius}&gases=${encodeURIComponent(gases)}`;
+                const res = await fetch(url);
+                const geojson = await res.json();
+                hotspotLayer.clearLayers();
+                hotspotLayer.addData(geojson);
+            } catch (e) { /* swallow */ }
+        }
+
+        async function refreshWeatherData() {
+            try {
+                const weatherUrl = `/api/weather?lat=${center[0]}&lon=${center[1]}`;
+                const weatherRes = await fetch(weatherUrl);
+                const weatherData = await weatherRes.json();
+
+                if (weatherData && !weatherData.error) {
+                    // Update weather display if weather data is available
+                    const weatherElement = document.querySelector('.weather-info');
+                    if (weatherElement) {
+                        weatherElement.innerHTML = `
+                            <strong>Weather:</strong> ${weatherData.current.temp_c}°C, ${weatherData.current.condition.text}, Wind: ${weatherData.current.wind_kph} km/h
+                        `;
+                    }
+                }
+            } catch (e) {
+                console.log('Weather refresh failed:', e);
+            }
+        }
+
+        refreshHotspots();
+        setInterval(refreshHotspots, 10000); // 10s polling
+        
+        // Refresh weather data every 5 minutes
+        if (document.querySelector('.weather-info')) {
+            setInterval(refreshWeatherData, 300000); // 5 minutes
+        }
+    </script>
+</body>
+</html>
+
+
