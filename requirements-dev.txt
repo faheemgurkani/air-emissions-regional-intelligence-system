@@ -1,0 +1,4 @@
+# Test dependencies for AERIS (DATA_LAYER and backend tests)
+-r requirements.txt
+pytest>=7.0
+pytest-asyncio>=0.21

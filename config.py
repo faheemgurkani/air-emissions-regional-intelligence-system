@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     bearer_token: Optional[str] = None
     earthdata_username: Optional[str] = None
     earthdata_password: Optional[str] = None
+    # Set True to use UAT (uat.urs.earthdata.nasa.gov, harmony.uat.earthdata.nasa.gov) for dev/testing
+    harmony_use_uat: bool = False
 
     # Existing
     weather_api_key: Optional[str] = None
@@ -83,8 +85,14 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Production Earthdata / Harmony base URLs (do not use UAT in production)
-CMR_BASE_URL = "https://cmr.earthdata.nasa.gov"
-HARMONY_BASE_URL = "https://harmony.earthdata.nasa.gov"
-URSA_TOKEN_URL = "https://urs.earthdata.nasa.gov/api/users/token"
-URSA_TOKENS_URL = "https://urs.earthdata.nasa.gov/api/users/tokens"
+# Earthdata / Harmony base URLs (switch to UAT when harmony_use_uat is True)
+if getattr(settings, "harmony_use_uat", False):
+    CMR_BASE_URL = "https://cmr.uat.earthdata.nasa.gov"
+    HARMONY_BASE_URL = "https://harmony.uat.earthdata.nasa.gov"
+    URSA_TOKEN_URL = "https://uat.urs.earthdata.nasa.gov/api/users/token"
+    URSA_TOKENS_URL = "https://uat.urs.earthdata.nasa.gov/api/users/tokens"
+else:
+    CMR_BASE_URL = "https://cmr.earthdata.nasa.gov"
+    HARMONY_BASE_URL = "https://harmony.earthdata.nasa.gov"
+    URSA_TOKEN_URL = "https://urs.earthdata.nasa.gov/api/users/token"
+    URSA_TOKENS_URL = "https://urs.earthdata.nasa.gov/api/users/tokens"

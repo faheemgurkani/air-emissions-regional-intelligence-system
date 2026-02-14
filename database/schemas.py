@@ -82,7 +82,7 @@ class AlertLogResponse(BaseModel):
     score_before: Optional[float] = None
     score_after: Optional[float] = None
     threshold: Optional[float] = None
-    metadata: Optional[dict] = None
+    metadata: Optional[dict] = Field(None, validation_alias="alert_metadata")
     created_at: datetime
     notified_channels: Optional[list] = None
 

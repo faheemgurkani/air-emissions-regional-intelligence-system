@@ -182,7 +182,7 @@ In `config.py` (and `.env` overrides):
 
 ## 9. UI Integration
 
-- **Route form** (`templates/index.html`): Checkbox **“Use pollution-optimized route (UPES + OSM)”** and dropdown **“Mode”** (commute / jogger / cyclist). When the checkbox is checked and optimization is enabled, `POST /route` uses the new engine and sets status text to “Pollution-optimized route (UPES + OSM)”.
+- **Route form** (Next.js `frontend/components/RouteForm.tsx`): Checkbox **“Use pollution-optimized route (UPES + OSM)”** and dropdown **“Mode”** (commute / jogger / cyclist). When the checkbox is checked and optimization is enabled, `POST /api/route/analyze` uses the new engine and sets status text to “Pollution-optimized route (UPES + OSM)”.
 - **Fallback:** If optimized routing is disabled or fails, the existing OSRM + `score_route_exposure` flow is used.
 
 ---

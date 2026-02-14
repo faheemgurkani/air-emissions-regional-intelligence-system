@@ -198,7 +198,7 @@ def run_alert_pipeline(self):
                     score_before=a.get("score_before"),
                     score_after=a.get("score_after"),
                     threshold=a.get("threshold"),
-                    metadata=a.get("metadata") or {},
+                    alert_metadata=a.get("metadata") or {},
                     notified_channels=channels,
                 )
                 session.add(log)

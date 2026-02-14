@@ -34,7 +34,7 @@ The system follows a **modular, layered architecture** with clear separation of 
 | Layer | Components | Description |
 |-------|-------------|-------------|
 | **Web Server** | FastAPI + Uvicorn | Serves web dashboard and handles all HTTP/API requests |
-| **Frontend** | Next.js (App Router), React, Leaflet.js, dark B&W theme | Primary UI; runs separately (e.g. port 3000), calls FastAPI via `NEXT_PUBLIC_API_URL`. Legacy Jinja2 templates remain for fallback. |
+| **Frontend** | Next.js (App Router), React, Leaflet.js, dark B&W theme | UI in `frontend/`; runs separately (e.g. port 3000), calls FastAPI via `NEXT_PUBLIC_API_URL`. |
 | **Computation** | NumPy, SciPy, Xarray | NASA TEMPO data parsing, clustering, and analysis |
 | **Visualization** | Matplotlib, Cartopy | Pollution heatmaps, tripanel figures, geospatial overlays |
 | **AI Services** | GROQ API (Llama 3.1 8B Instant) | Concise, actionable interpretations and commute advice |
@@ -54,7 +54,7 @@ The system follows a **modular, layered architecture** with clear separation of 
 3. **Data pipeline** → NetCDF → xarray Datatree → quality filtering → hotspot detection → regional alerts. Optionally persist pollution grid cells to PostGIS when `PERSIST_POLLUTION_GRID=true`.
 4. **Visualization** → Multi-gas heatmaps + per-gas tripanel figures → saved to `static/outputs/`.
 5. **Optional** → Weather/pollutant movement (cached in Redis when available) → GROQ interpretations.
-6. **Response** → Next.js frontend receives JSON from `/api/analyze` and `/api/route/analyze`; images are loaded from FastAPI `/static/outputs/`. Legacy: rendered HTML (result/route) when using Jinja2 templates directly.
+6. **Response** → Next.js frontend receives JSON from `/api/analyze` and `/api/route/analyze`; images are loaded from FastAPI `/static/outputs/`.
 
 ### 2.4 Directory and File Layout
 
@@ -102,17 +102,12 @@ air-emissions-regional-intelligence-system/
 ├── TEMPO.py                   # Standalone: Harmony NO2 fetch + process + map (Madre wildfire)
 ├── tempo_all.py               # TempoMultiGasAnalyzer: multi-gas Harmony fetch + analysis
 ├── GroundSensorAnalysis.py    # EPA AirNow ground sensor integration (standalone)
-├── frontend/                   # Next.js app (primary frontend)
+├── frontend/                   # Next.js app (frontend)
 │   ├── app/                    # App Router: layout, page (home), results/, route/
 │   ├── components/             # AnalyzeForm, RouteForm, ResultContent, ResultMap, RouteMap, RouteList
 │   ├── lib/api.ts              # API client (NEXT_PUBLIC_API_URL), analyzeFull, routeAnalyze, getHotspots
 │   └── .env.local              # NEXT_PUBLIC_API_URL (e.g. http://localhost:8000)
-├── templates/                  # Legacy Jinja2 (fallback)
-│   ├── index.html              # Main form: location, coords, radius, gases, weather/prediction toggles
-│   ├── result.html             # Analysis results: images, alerts, hotspots, weather, map
-│   └── route.html              # Route safety: OSRM routes, exposure scoring, Leaflet map
 ├── static/
-│   ├── style.css               # Shared styles (legacy)
 │   └── outputs/                # Generated analysis images (gitignored)
 ├── TempData/                  # Cached TEMPO NetCDF files (fallback when object storage not used)
 ├── GroundData/                # Ground sensor / placeholder data
@@ -120,7 +115,6 @@ air-emissions-regional-intelligence-system/
 │   ├── PROJECT_DOCUMENTATION.md
 │   ├── DATA_LAYER.md
 │   ├── DATA_INGESTION_AND_SCHEDULER_LAYER.md
-│   ├── POLLUTION_INTELLIGENCE_ENGINE_UPES.md
 │   ├── ROUTE_OPTIMIZATION_ENGINE.md
 │   ├── ALERTS_AND_PERSONALIZATION.md
 │   └── PRODUCTION_IMPLEMENTATION_PLAN.md
@@ -135,7 +129,7 @@ air-emissions-regional-intelligence-system/
 
 ### 3.1 api_server.py (Application Core)
 
-- **Framework:** FastAPI; static files and Jinja2 templates mounted.
+- **Framework:** FastAPI; static files mounted at `/static`.
 - **Domain config:**
   - `VARIABLE_NAMES`: TEMPO product paths (e.g. `product/vertical_column_troposphere` for NO2/CH2O).
   - `UNITS`: Display units per gas (molecules/cm², index, Dobson Units, etc.).
@@ -198,7 +192,7 @@ air-emissions-regional-intelligence-system/
 - **Functions:**
   - `generate_weather_interpretation(weather_data, location_name)` — 2–3 sentence summary: air quality status, best time, key precaution; markdown stripped for HTML.
   - `generate_prediction_interpretation(pollutant_predictions, location_name)` — trend, best time, risk from next-3h predictions.
-- **Utility:** `clean_markdown_formatting(text)` for safe display in templates.
+- **Utility:** `clean_markdown_formatting(text)` for safe display in UI.
 
 ### 3.8 GroundSensorAnalysis.py
 
@@ -223,32 +217,76 @@ air-emissions-regional-intelligence-system/
 ### 3.10 Pollution Intelligence Engine (UPES)
 
 - **Purpose:** Unified Pollution Exposure Score as a **parallel** layer: aggregate `pollution_grid` to a regular grid, normalize gases, apply weights, environmental modifiers (HDF, WTF, TF), optional EMA, then write hourly GeoTIFFs and JSON logs. Does not replace existing route exposure or analysis.
-- **Config:** See [POLLUTION_INTELLIGENCE_ENGINE_UPES.md](POLLUTION_INTELLIGENCE_ENGINE_UPES.md): `upes_output_base`, `upes_grid_resolution_deg`, `upes_bbox_*`, `upes_traffic_alpha`, `upes_ema_lambda`, `upes_alert_threshold`, `upes_enabled`.
-- **Tasks:** `compute_upes_hourly` runs at minute 15 and after `fetch_tempo_hourly` when ingest succeeds; writes to `outputs/hourly_scores/` and `outputs/logs/`, sets Redis `upes:last_update`.
+- **Architecture:**
+
+```mermaid
+flowchart LR
+  subgraph inputs [Input sources]
+    PG[(pollution_grid)]
+    Weather[WeatherAPI]
+    Traffic[Traffic optional]
+  end
+  subgraph preprocess [Preprocessing]
+    Norm[Gas normalization]
+    Align[Temporal alignment]
+  end
+  subgraph upes [UPES core]
+    SatScore[Satellite score]
+    Mods[HDF WTF TF]
+    EMA[EMA smoothing]
+    Final[FinalScore]
+  end
+  subgraph out [Output]
+    Store[Storage and logs]
+    Viz[Visualization and alerts]
+  end
+  PG --> Norm
+  Weather --> Align
+  Traffic --> Align
+  Norm --> Align
+  Align --> SatScore
+  SatScore --> Mods
+  Mods --> EMA
+  EMA --> Final
+  Final --> Store
+  Final --> Viz
+```
+
+- **Pipeline:** Aggregate `pollution_grid` to regular grid → normalize gases (0–1) → satellite score (weighted sum) → environmental modifiers (HDF, WTF, TF) → optional EMA → final score → write GeoTIFF + JSON log → set Redis `upes:last_update`.
+- **Config** (in `config.py`):
+
+| Setting | Type | Default | Description |
+|--------|------|---------|-------------|
+| `upes_output_base` | Optional[str] | None (→ `outputs/` under project root) | Base directory for UPES outputs. |
+| `upes_grid_resolution_deg` | float | 0.05 | Grid cell size in degrees. |
+| `upes_bbox_west/south/east/north` | Optional[float] | None (use TEMPO bbox) | Override bbox for UPES grid. |
+| `upes_traffic_alpha` | float | 0.1 | TF = 1 + alpha * traffic_density. |
+| `upes_ema_lambda` | Optional[float] | 0.6 | EMA smoothing; None to disable. |
+| `upes_alert_threshold` | float | 0.5 | FinalScore > threshold = high-risk in heatmap. |
+| `upes_enabled` | bool | True | If False, task skips. |
+
+Gas weights: `config.UPES_DEFAULT_WEIGHTS` (NO2, PM, O3, CH2O, AI).
+
+- **Modules:** `services/upes/preprocessing.py` (`normalize_gas`, `percentile_bounds`, `normalize_gas_with_bounds`, `hour_slot_utc`); `core.py` (`compute_satellite_score`, `humidity_dispersion_factor`, `wind_factor`, `traffic_factor`, `apply_ema`, `compute_final_score`); `grid_aggregation.py` (`GridSpec`, `aggregate_pollution_grid_to_regular`); `storage.py` (`upes_output_base`, `write_geotiff`, `write_upes_rasters`, `write_upes_log`); `visualization.py` (`render_upes_heatmap`).
+- **Output layout:** `outputs/hourly_scores/satellite_score/`, `outputs/hourly_scores/final_score/` (GeoTIFFs per hour), `outputs/logs/` (JSON per run).
+- **Tasks:** `compute_upes_hourly` runs at minute 15 and after `fetch_tempo_hourly` when ingest succeeds. Steps: read latest hour from `pollution_grid` → aggregate to grid → weather at bbox center → normalize → satellite score → HDF/WTF/TF → (optional) load previous final score for EMA → final score → write GeoTIFF + JSON log → set Redis `upes:last_update`.
 - **API:** `GET /api/upes/latest`, `GET /api/upes/grid`, `GET /api/upes/heatmap` (PNG of latest final score).
+- **Usage:** Ensure `pollution_grid` is populated (run ingestion first); set `upes_enabled=true` and run Celery worker + beat. After an ingest and/or at :15, `compute_upes_hourly` writes to `outputs/` and updates Redis. Call `GET /api/upes/latest` or `GET /api/upes/heatmap` to inspect results.
 
 ---
 
 ## 4. Web Interface and Routes
 
-### 4.1 Frontend (Next.js) and legacy pages
+### 4.1 Frontend (Next.js)
 
-The **primary frontend** is the Next.js app in `frontend/`. It runs as a separate app (e.g. `http://localhost:3000`) and calls the FastAPI backend via `NEXT_PUBLIC_API_URL` (e.g. `http://localhost:8000`). CORS is enabled for the Next.js origin. Generated images are loaded from FastAPI `/static/outputs/`.
+The frontend is the Next.js app in `frontend/`. It runs as a separate app (e.g. `http://localhost:3000`) and calls the FastAPI backend via `NEXT_PUBLIC_API_URL` (e.g. `http://localhost:8000`). CORS is enabled for the Next.js origin. Generated images are loaded from FastAPI `/static/outputs/`. The legacy Jinja2 templates and HTML routes have been removed.
 
-| Next.js route | Description |
-|---------------|-------------|
-| `/` | Home: Analyze form and Route form. |
-| `/results` | Analysis results (re-fetches via `/api/analyze` using query params). |
-| `/route` | Route safety results (from sessionStorage or re-fetches via `/api/route/analyze`). |
-
-**Legacy (Jinja2):** FastAPI still serves HTML for direct use:
-
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/` | GET | **Index:** Form for location, radius, gases, weather/prediction toggles. |
-| `/analyze` | POST | Runs analysis; returns **result.html** with multi-gas image, per-gas tripanels, alerts, hotspots, weather, predictions, GROQ interpretations, Leaflet map. |
-| `/route` | POST | **Route safety:** Origin/destination (geocoded), gases, grid step. Optional “Use pollution-optimized route” and mode. Returns **route.html** with OSRM or UPES+OSM route(s), exposure scoring, hotspot overlay. |
-| `/route/alternate` | GET | Same as route analysis with query params; renders route page. |
+| Route | Description |
+|-------|-------------|
+| `GET /` (API) | Returns JSON with message, docs link, and frontend hint. |
+| Next.js `/` | Home: Analyze form and Route form. |
+| Next.js `/results` | Analysis results (re-fetches via `POST /api/analyze` using query params). |
+| Next.js `/route` | Route safety results (from sessionStorage or re-fetches via `POST /api/route/analyze`). |
 
 ### 4.2 API Endpoints
 
@@ -282,8 +320,7 @@ The **primary frontend** is the Next.js app in `frontend/`. It runs as a separat
 
 ### 4.3 Frontend Assets
 
-- **Next.js (primary):** App in `frontend/`; dark black-and-white theme; Leaflet with CartoDB dark tiles; `NEXT_PUBLIC_API_URL` must point to the FastAPI base URL (e.g. `http://localhost:8000`). Run with `npm run dev` (port 3000 by default).
-- **Legacy:** Jinja2 templates; `style.css`; Leaflet (result + route) for maps.
+- **Next.js:** App in `frontend/`; dark black-and-white theme; Leaflet with CartoDB dark tiles; `NEXT_PUBLIC_API_URL` must point to the FastAPI base URL (e.g. `http://localhost:8000`). Run with `npm run dev` (port 3000 by default).
 - **Static:** Generated images under `static/outputs/`; served by FastAPI; Next.js uses full URLs (`NEXT_PUBLIC_API_URL` + path) to load them.
 - **Maps:** Next.js uses CartoDB dark tiles; result page: center circle, hotspot layer (polling `/api/hotspots` every 10s); route page: route segments colored by severity, origin/destination markers, hotspot circles.
 
@@ -347,7 +384,7 @@ Note: Harmony client is used only in `TEMPO.py` and `tempo_all.py` (optional for
 - **Customization (from README):**
   - `SPATIAL_BOUNDS` / `TIME_CONFIG` — in `TEMPO.py` for Harmony fetch.
   - `thresholds` — in `api_server.py` (and tempo_all/TEMPO for consistency).
-  - Templates — `templates/` for UI changes.
+  - UI — `frontend/` (Next.js) for layout and components.
 
 ---
 
@@ -355,7 +392,7 @@ Note: Harmony client is used only in `TEMPO.py` and `tempo_all.py` (optional for
 
 1. **TEMPO data:** Either pre-downloaded into `TempData/` (and optionally per-gas subdirs), or metadata in `netcdf_files` with blobs in S3/MinIO. Resolver: latest per gas from DB → download to temp file → pass as `file_overrides` into `load_and_analyze_for_gases`; fallback to filesystem scan when object storage not configured.
 2. **Web request:** User submits location + parameters → geocode (if needed) → resolve NetCDF paths (DB + object storage or TempData) → `load_and_analyze_for_gases` → optionally persist pollution grid when `PERSIST_POLLUTION_GRID=true` → hotspots + alerts.
-3. **Images:** Multi-gas and tripanel figures written to `static/outputs/`; URLs passed to templates.
+3. **Images:** Multi-gas and tripanel figures written to `static/outputs/`; URLs returned in API JSON for the Next.js frontend.
 4. **Weather/predictions:** Optional; when enabled, responses are cached in Redis (when configured); GROQ summaries generated when key present.
 5. **Route:** OSRM routes → resample → exposure score with pollution grids + hotspot circles → safest route and GeoJSON hotspots to template. Optional pollution-optimized routing (UPES + OSM).
 6. **Auth:** Register/login issue JWT; saved-routes CRUD use `get_current_user` and store `user_id`.

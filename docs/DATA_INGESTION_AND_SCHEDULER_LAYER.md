@@ -61,19 +61,19 @@ flowchart TB
 
 **Flow summary:**
 
-| Step | Component | Description |
-|------|------------|-------------|
-| 1 | **Celery Beat** | Triggers `fetch_tempo_hourly` on a schedule (hourly at minute 0). |
-| 2 | **fetch_tempo_hourly** | Celery task: for each gas, builds Harmony URL, submits, polls if async, downloads GeoTIFF. |
-| 3 | **Harmony Request Builder** | Builds OGC Coverages rangeset URL (lon, lat, time, format=image/tiff). |
-| 4 | **Submit** | GET with `Authorization: Bearer <token>`; may return redirect to job URL (async). |
-| 5 | **Async Job Poll** | If async, polls job URL until status is successful/complete or failed. |
-| 6 | **Download GeoTIFF** | Writes GeoTIFF to a temp file (or from sync 200 response). |
-| 7 | **Raster to Grid** | `services/raster_normalizer`: GeoTIFF → grid rows (WKT polygon, severity) in chunks. |
-| 8 | **PostGIS** | Bulk insert into `pollution_grid` (sync SQLAlchemy + GeoAlchemy2 WKTElement). |
-| 9 | **S3 or MinIO** | Optional upload of raw GeoTIFF for audit (`audit/geotiff/{date}/{gas}_{hour}.tif`). |
-| 10 | **Redis** | After successful ingest: `setex("tempo:last_update", 3600, iso_timestamp)`. |
-| 11 | **Recompute Saved Routes** | Celery task: for each `saved_routes` row, ST_Intersects with latest grid, update exposure score. |
+| Step | Component                   | Description                                                                                      |
+| ---- | --------------------------- | ------------------------------------------------------------------------------------------------ |
+| 1    | **Celery Beat**             | Triggers `fetch_tempo_hourly` on a schedule (hourly at minute 0).                                |
+| 2    | **fetch_tempo_hourly**      | Celery task: for each gas, builds Harmony URL, submits, polls if async, downloads GeoTIFF.       |
+| 3    | **Harmony Request Builder** | Builds OGC Coverages rangeset URL (lon, lat, time, format=image/tiff).                           |
+| 4    | **Submit**                  | GET with `Authorization: Bearer <token>`; may return redirect to job URL (async).                |
+| 5    | **Async Job Poll**          | If async, polls job URL until status is successful/complete or failed.                           |
+| 6    | **Download GeoTIFF**        | Writes GeoTIFF to a temp file (or from sync 200 response).                                       |
+| 7    | **Raster to Grid**          | `services/raster_normalizer`: GeoTIFF → grid rows (WKT polygon, severity) in chunks.             |
+| 8    | **PostGIS**                 | Bulk insert into `pollution_grid` (sync SQLAlchemy + GeoAlchemy2 WKTElement).                    |
+| 9    | **S3 or MinIO**             | Optional upload of raw GeoTIFF for audit (`audit/geotiff/{date}/{gas}_{hour}.tif`).              |
+| 10   | **Redis**                   | After successful ingest: `setex("tempo:last_update", 3600, iso_timestamp)`.                      |
+| 11   | **Recompute Saved Routes**  | Celery task: for each `saved_routes` row, ST_Intersects with latest grid, update exposure score. |
 
 ---
 
@@ -83,21 +83,21 @@ flowchart TB
 
 The following were added (or confirmed) for the ingestion layer:
 
-| Setting | Type | Source env | Description |
-|---------|------|------------|-------------|
-| `bearer_token` | `Optional[str]` | `BEARER_TOKEN` | Prefer this for Harmony; if unset, token is refreshed from username/password. |
-| `earthdata_username` | `Optional[str]` | `EARTHDATA_USERNAME` | Earthdata login for token refresh. |
-| `earthdata_password` | `Optional[str]` | `EARTHDATA_PASSWORD` | Earthdata password for token refresh. |
-| `redis_url` | `Optional[str]` | `REDIS_URL` | Celery broker and result backend; also used for `tempo:last_update`. |
+| Setting              | Type            | Source env           | Description                                                                   |
+| -------------------- | --------------- | -------------------- | ----------------------------------------------------------------------------- |
+| `bearer_token`       | `Optional[str]` | `BEARER_TOKEN`       | Prefer this for Harmony; if unset, token is refreshed from username/password. |
+| `earthdata_username` | `Optional[str]` | `EARTHDATA_USERNAME` | Earthdata login for token refresh.                                            |
+| `earthdata_password` | `Optional[str]` | `EARTHDATA_PASSWORD` | Earthdata password for token refresh.                                         |
+| `redis_url`          | `Optional[str]` | `REDIS_URL`          | Celery broker and result backend; also used for `tempo:last_update`.          |
 
 ### 3.2 Production base URLs (constants in `config.py`)
 
-| Constant | Value | Use |
-|----------|--------|-----|
-| `CMR_BASE_URL` | `https://cmr.earthdata.nasa.gov` | CMR catalog (collection IDs resolved at setup, not on every run). |
-| `HARMONY_BASE_URL` | `https://harmony.earthdata.nasa.gov` | Harmony OGC API. |
-| `URSA_TOKEN_URL` | `https://urs.earthdata.nasa.gov/api/users/token` | POST to create token. |
-| `URSA_TOKENS_URL` | `https://urs.earthdata.nasa.gov/api/users/tokens` | GET existing tokens. |
+| Constant           | Value                                             | Use                                                               |
+| ------------------ | ------------------------------------------------- | ----------------------------------------------------------------- |
+| `CMR_BASE_URL`     | `https://cmr.earthdata.nasa.gov`                  | CMR catalog (collection IDs resolved at setup, not on every run). |
+| `HARMONY_BASE_URL` | `https://harmony.earthdata.nasa.gov`              | Harmony OGC API.                                                  |
+| `URSA_TOKEN_URL`   | `https://urs.earthdata.nasa.gov/api/users/token`  | POST to create token.                                             |
+| `URSA_TOKENS_URL`  | `https://urs.earthdata.nasa.gov/api/users/tokens` | GET existing tokens.                                              |
 
 **Important:** Production uses `urs.earthdata.nasa.gov` and `harmony.earthdata.nasa.gov` only — **not UAT**.
 
@@ -123,13 +123,13 @@ In `.env.example` the following are documented for Earthdata/Harmony:
   - Else `POST URSA_TOKEN_URL` with Basic auth (`EARTHDATA_USERNAME` / `EARTHDATA_PASSWORD`).
 - **Collection IDs:** TEMPO collection IDs are stored as constants (no CMR call on each run):
 
-  | Gas | Collection ID |
-  |-----|----------------|
-  | NO2 | C2930763263-LARC_CLOUD |
+  | Gas  | Collection ID          |
+  | ---- | ---------------------- |
+  | NO2  | C2930763263-LARC_CLOUD |
   | CH2O | C2930763264-LARC_CLOUD |
-  | AI | C2930763265-LARC_CLOUD |
-  | PM | C2930763266-LARC_CLOUD |
-  | O3 | C2930763267-LARC_CLOUD |
+  | AI   | C2930763265-LARC_CLOUD |
+  | PM   | C2930763266-LARC_CLOUD |
+  | O3   | C2930763267-LARC_CLOUD |
 
 - **Build request URL:** `build_tempo_rangeset_url(collection_id, variable, west, south, east, north, start_time, end_time, format="image/tiff")` builds the OGC API Coverages rangeset URL:
   - Pattern: `{HARMONY_BASE_URL}/{collection_id}/ogc-api-coverages/1.0.0/collections/{variable}/coverage/rangeset?subset=lon({west}:{east})&subset=lat({south}:{north})&subset=time("{start_time}":"{end_time}")&format=image/tiff`
@@ -139,14 +139,36 @@ In `.env.example` the following are documented for Earthdata/Harmony:
 
 ### 4.2 Main API
 
-| Function | Description |
-|----------|-------------|
-| `get_bearer_token()` | Returns Bearer token from config or Earthdata API. |
-| `build_tempo_rangeset_url(...)` | Builds Harmony rangeset URL for given collection, bbox, and time range. |
-| `submit_request(url, token)` | Submits GET; returns `(response, job_url, is_async)`. |
-| `wait_for_job(job_url, token, ...)` | Polls until job completes or fails. |
-| `download_to_temp_file(url, token, suffix)` | Downloads URL to temp file. |
+| Function                                                                   | Description                                                                                                                            |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `get_bearer_token()`                                                       | Returns Bearer token from config or Earthdata API.                                                                                     |
+| `build_tempo_rangeset_url(...)`                                            | Builds Harmony rangeset URL for given collection, bbox, and time range.                                                                |
+| `submit_request(url, token)`                                               | Submits GET; returns `(response, job_url, is_async)`.                                                                                  |
+| `wait_for_job(job_url, token, ...)`                                        | Polls until job completes or fails.                                                                                                    |
+| `download_to_temp_file(url, token, suffix)`                                | Downloads URL to temp file.                                                                                                            |
 | `fetch_tempo_geotiff(gas, west, south, east, north, start_time, end_time)` | End-to-end: build URL, submit, poll if async, download; returns path to temp GeoTIFF or `None`. Caller must unlink the file when done. |
+| `search_cmr_collections(short_name=None, version=None, keyword=None)`     | Search CMR for collections (notebook pattern). No auth required. Returns list of feed entry dicts (`id`, `title`, `short_name`, etc.). Use for exploration; scheduler uses fixed `TEMPO_COLLECTION_IDS`. |
+
+### 4.3 Searching for collections (exploration)
+
+The **Harmony API introduction** notebook uses the CMR API to resolve a collection ID from a short name (e.g. `harmony_example`). This layer provides the same pattern for exploration only (scheduler does not call CMR on each run):
+
+- **`search_cmr_collections(short_name=None, version=None, keyword=None)`** in `services/harmony_service.py` — calls `{CMR_BASE_URL}/search/collections.json` with the given params and returns `feed.entry` list. Example: `keyword="TEMPO"` returns TEMPO L2/L3 collections (NO2, HCHO, O3, etc.).
+- **`scripts/explore_cmr_and_harmony.py`** — CLI to run CMR search and/or ingestion validation:
+  - `python scripts/explore_cmr_and_harmony.py --keyword TEMPO` — list TEMPO-related collections.
+  - `python scripts/explore_cmr_and_harmony.py --short-name harmony_example --cmr-uat` — search UAT CMR (use with Harmony UAT).
+  - `python scripts/explore_cmr_and_harmony.py --validate` — run token and URL checks; add `--live` to perform a live Harmony fetch and grid normalization check.
+
+### 4.4 Analyzing fetched data (accuracy and required format)
+
+**`scripts/analyze_fetched_data.py`** runs a full check that the data being fetched and analyzed is in the required format and is physically plausible:
+
+- **Raster:** CRS, dimensions, dtype, bounds; band stats (min/max/mean, valid vs NaN); value range vs gas-specific plausible bounds; flag for likely fill values.
+- **Grid rows:** Required keys (`timestamp`, `gas_type`, `geom_wkt`, `pollution_value`, `severity_level`); WKT polygon format; severity 0–4; consistency of `severity_level` with `classify_pollution_level(pollution_value, gas)`.
+- **Usage:**  
+  - `python scripts/analyze_fetched_data.py --geotiff /path/to/file.tif --gas NO2` — analyze an existing GeoTIFF.  
+  - `python scripts/analyze_fetched_data.py --live --gas NO2` — fetch from Harmony (default or 7-day fallback window).  
+  - `python scripts/analyze_fetched_data.py --live --gas NO2 --find-granules` — use CMR granule search to pick a time window with granules, then fetch and analyze. Exits 0 only if all checks pass.
 
 ---
 
@@ -163,6 +185,7 @@ In `.env.example` the following are documented for Earthdata/Harmony:
 
 - **rasterio:** Open GeoTIFF, read band 1, get affine `transform`.
 - **Grid iteration:** Iterate over pixel grid; optionally **subsample** to cap cell count (default `max_cells=5000`). For each pixel:
+  - Skip NaN and **fill/no-data** (values ≥ `FILL_VALUE_MAX[gas]`; TEMPO often uses ~9.97e36).
   - `lon_c, lat_c = xy(transform, row, col)` (pixel center).
   - Pixel bounds derived from transform cell size (half-pixel box).
   - Build WKT polygon for the cell (closed ring).
@@ -189,15 +212,15 @@ In `.env.example` the following are documented for Earthdata/Harmony:
 
 No schema change was required for the minimal pipeline. Columns:
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | Integer, PK | Auto-increment. |
-| `timestamp` | DateTime(timezone=True) | Time of the observation window. |
-| `gas_type` | Text | e.g. NO2, CH2O, AI, PM, O3. |
-| `geom` | Geometry(POLYGON, 4326) | Cell polygon (WGS84). |
-| `pollution_value` | Double | Raw value from raster. |
-| `severity_level` | Integer | 0–4 from `classify_pollution_level`. |
-| `created_at` | DateTime(timezone=True) | Server default. |
+| Column            | Type                    | Description                          |
+| ----------------- | ----------------------- | ------------------------------------ |
+| `id`              | Integer, PK             | Auto-increment.                      |
+| `timestamp`       | DateTime(timezone=True) | Time of the observation window.      |
+| `gas_type`        | Text                    | e.g. NO2, CH2O, AI, PM, O3.          |
+| `geom`            | Geometry(POLYGON, 4326) | Cell polygon (WGS84).                |
+| `pollution_value` | Double                  | Raw value from raster.               |
+| `severity_level`  | Integer                 | 0–4 from `classify_pollution_level`. |
+| `created_at`      | DateTime(timezone=True) | Server default.                      |
 
 ### 6.2 Indexes (from initial migration)
 

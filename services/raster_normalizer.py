@@ -14,6 +14,15 @@ from pollution_utils import classify_pollution_level
 DEFAULT_CHUNK_SIZE = 2000
 DEFAULT_MAX_CELLS = 5000
 
+# Values at or above this (per gas) are treated as fill/no-data and skipped (TEMPO often uses ~9.97e36)
+FILL_VALUE_MAX = {
+    "NO2": 1e18,
+    "CH2O": 1e18,
+    "AI": 1e10,
+    "PM": 1e10,
+    "O3": 1e10,
+}
+
 
 def _pixel_bounds(
     transform: Any,
@@ -90,6 +99,8 @@ def geotiff_to_grid_rows(
             val = float(band[i, j])
             if np.isnan(val):
                 continue
+            if val >= FILL_VALUE_MAX.get(gas_type, 1e30):
+                continue  # skip fill/no-data
             lon_min, lat_min, lon_max, lat_max = _pixel_bounds(transform, j, i)
             wkt = _cell_to_wkt(lon_min, lat_min, lon_max, lat_max)
             _, severity = classify_pollution_level(val, gas_type)

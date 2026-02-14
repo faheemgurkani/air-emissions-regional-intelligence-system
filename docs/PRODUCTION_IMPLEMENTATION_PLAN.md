@@ -50,7 +50,7 @@ AERIS is a **real-time, pollution-aware navigation system** that ingests satelli
 The system is implemented as a **single FastAPI application** plus **Celery workers**, not as physically separate microservices. Logical domains are clearly separated and can be split into separate services later if needed:
 
 - **Ingestion:** Celery task `fetch_tempo_hourly`, Harmony integration, raster normalization → PostGIS; see [DATA_INGESTION_AND_SCHEDULER_LAYER.md](DATA_INGESTION_AND_SCHEDULER_LAYER.md).
-- **Scoring (UPES):** Celery task `compute_upes_hourly`; humidity, wind, traffic factors; GeoTIFF output; see [POLLUTION_INTELLIGENCE_ENGINE_UPES.md](POLLUTION_INTELLIGENCE_ENGINE_UPES.md).
+- **Scoring (UPES):** Celery task `compute_upes_hourly`; humidity, wind, traffic factors; GeoTIFF output; see [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md) section 3.10.
 - **Routing:** OSMnx graph, UPES along edges, multi-objective cost (α·Exposure + β·Distance + γ·Time), mode modifiers, Dijkstra/k-shortest; see [ROUTE_OPTIMIZATION_ENGINE.md](ROUTE_OPTIMIZATION_ENGINE.md).
 - **Alerts:** UPES-based route scoring, deterioration/hazard/wind-shift/time-based detection, sensitivity scaling, n8n webhook; see [ALERTS_AND_PERSONALIZATION.md](ALERTS_AND_PERSONALIZATION.md).
 

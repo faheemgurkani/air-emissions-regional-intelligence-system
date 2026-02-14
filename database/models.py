@@ -118,7 +118,7 @@ class AlertLog(Base):
     score_before: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
     score_after: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
     threshold: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
-    metadata: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    alert_metadata: Mapped[Optional[dict]] = mapped_column("metadata", JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
     notified_channels: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 

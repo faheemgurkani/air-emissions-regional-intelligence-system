@@ -12,7 +12,10 @@ from urllib.parse import urljoin
 
 import requests
 
+from urllib.parse import urlencode
+
 from config import (
+    CMR_BASE_URL,
     HARMONY_BASE_URL,
     URSA_TOKEN_URL,
     URSA_TOKENS_URL,
@@ -32,6 +35,73 @@ TEMPO_COLLECTION_IDS = {
 
 # Default variable for coverage request (Harmony "collections" = variables; "all" often works)
 DEFAULT_VARIABLE = "all"
+
+
+def search_cmr_collections(
+    short_name: Optional[str] = None,
+    version: Optional[int] = None,
+    keyword: Optional[str] = None,
+) -> list[dict]:
+    """
+    Search CMR for collections (notebook pattern: short_name + version; optional keyword).
+    CMR does not require auth for collection search.
+    Returns list of feed entry dicts (id, title, short_name, summary, etc.).
+    """
+    params: dict = {}
+    if short_name:
+        params["short_name"] = short_name
+    if version is not None:
+        params["version"] = version
+    if keyword:
+        params["keyword"] = keyword
+    if not params:
+        return []
+    url = f"{CMR_BASE_URL.rstrip('/')}/search/collections.json?{urlencode(params)}"
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        entries = data.get("feed", {}).get("entry", [])
+        return list(entries)
+    except Exception as e:
+        logger.exception("CMR collection search failed: %s", e)
+        return []
+
+
+def search_cmr_granules(
+    collection_id: str,
+    start_time: datetime,
+    end_time: datetime,
+    west: float,
+    south: float,
+    east: float,
+    north: float,
+    page_size: int = 5,
+) -> list[dict]:
+    """
+    Search CMR for granules in a collection within temporal and bbox.
+    No auth required. Returns list of granule entry dicts (id, title, time_start, etc.).
+    Use to find when/where data exists before calling Harmony.
+    """
+    temporal = f"{start_time.strftime('%Y-%m-%dT%H:%M:%SZ')},{end_time.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+    bbox = f"{west},{south},{east},{north}"
+    # CMR granule search: concept_id (or collection_concept_id) for collection
+    params = {
+        "concept_id": collection_id,
+        "temporal": temporal,
+        "bounding_box": bbox,
+        "page_size": page_size,
+    }
+    url = f"{CMR_BASE_URL.rstrip('/')}/search/granules.json?{urlencode(params)}"
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        entries = data.get("feed", {}).get("entry", [])
+        return list(entries)
+    except Exception as e:
+        logger.debug("CMR granule search failed (non-fatal): %s", e)
+        return []
 
 
 def get_bearer_token() -> Optional[str]:
@@ -139,6 +209,8 @@ def submit_request(url: str, token: Optional[str]) -> Tuple[Optional[requests.Re
     if r.status_code in (302, 303, 307):
         location = r.headers.get("Location")
         if location:
+            if not location.startswith("http"):
+                location = urljoin(HARMONY_BASE_URL + "/", location)
             logger.info("Harmony async job: %s", location)
             return (None, location, True)
     if r.status_code == 200:
@@ -156,6 +228,12 @@ def submit_request(url: str, token: Optional[str]) -> Tuple[Optional[requests.Re
             return (r, None, False)
         # Binary response (sync GeoTIFF)
         return (r, None, False)
+    if r.status_code in (400, 403):
+        try:
+            body = r.text[:500] if r.text else "(empty)"
+            logger.warning("Harmony %s. Response: %s", r.status_code, body)
+        except Exception:
+            pass
     r.raise_for_status()
     return (None, None, False)
 

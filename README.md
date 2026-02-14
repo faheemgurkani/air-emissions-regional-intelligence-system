@@ -46,7 +46,7 @@ The AERIS system follows a modular architecture with clear separation of concern
 | Layer                   | Components            | Description                                              |
 | ----------------------- | --------------------- | -------------------------------------------------------- |
 | **Web Server**          | FastAPI + Uvicorn     | Serves web dashboard and handles API requests            |
-| **Frontend**            | Jinja2 templates, CSS | Displays results and user interface                      |
+| **Frontend**            | Next.js (frontend/)   | Displays results and user interface; calls FastAPI API   |
 | **Computation**         | NumPy, SciPy, Xarray  | Handles NASA TEMPO data parsing and analysis             |
 | **Visualization**       | Matplotlib, Cartopy   | Generates pollution heatmaps and geospatial overlays     |
 | **AI Services**         | GROQ API              | Provides intelligent interpretations and recommendations |
@@ -69,13 +69,7 @@ AERIS/
 ├── TEMPO.py                  # NASA TEMPO data processing
 ├── tempo_all.py              # Enhanced multi-gas analyzer
 ├── GroundSensorAnalysis.py   # Ground sensor integration
-├── templates/                # Legacy Jinja2 templates
-│   ├── index.html           # Main input interface
-│   ├── result.html          # Analysis results display
-│   └── route.html           # Route safety analysis
-├── static/                  # Static assets
-│   ├── style.css           # Web styling
-│   └── outputs/            # Generated analysis images
+├── static/                  # Generated analysis images (outputs/)
 ├── TempData/               # Cached TEMPO data files
 ├── GroundData/             # Ground sensor data
 ├── requirements.txt        # Python dependencies
@@ -139,13 +133,9 @@ AERIS/
    npm run dev
    ```
 
-   Open your browser at `http://localhost:3000`. The frontend calls the API at `NEXT_PUBLIC_API_URL` (default `http://localhost:8000`).
+   Open your browser at `http://localhost:3000`. The frontend calls the API at `NEXT_PUBLIC_API_URL` (default `http://localhost:8000`). Visiting `http://localhost:8000` returns API info and a link to the docs.
 
-3. **Legacy: use FastAPI-only UI**
-
-   With the backend running, you can also open `http://localhost:8000` to use the Jinja2-rendered pages (GET `/`, POST `/analyze`, POST `/route`).
-
-### Web Interface (Next.js)
+### Web Interface
 
 #### Main Analysis (`/`)
 
@@ -242,7 +232,7 @@ ACTION: STAY INDOORS! Dangerous air quality detected.
 | `SPATIAL_BOUNDS` | `TEMPO.py`      | Defines lat/lon range for analysis        |
 | `TIME_CONFIG`    | `TEMPO.py`      | Start & end date for TEMPO data retrieval |
 | `thresholds`     | `api_server.py` | Adjusts severity levels for pollutants    |
-| `TEMPLATES`      | `templates/`    | Modify HTML layout for web UI             |
+| UI / theme      | `frontend/`     | Next.js app; dark B&W theme in `app/globals.css` and components |
 
 ## Future Enhancements
 
