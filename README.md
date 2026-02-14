@@ -58,13 +58,18 @@ The AERIS system follows a modular architecture with clear separation of concern
 ```
 AERIS/
 ├── api_server.py              # Main FastAPI application
+├── frontend/                  # Next.js app (primary UI, dark theme)
+│   ├── app/                   # App Router: layout, page, results/, route/
+│   ├── components/            # Forms, ResultContent, ResultMap, RouteMap, RouteList
+│   ├── lib/api.ts             # API client (NEXT_PUBLIC_API_URL)
+│   └── .env.local             # NEXT_PUBLIC_API_URL=http://localhost:8000
 ├── weather_service.py         # Weather data integration
 ├── groq_service.py           # AI interpretation service
-├── pollutant_predictor.py    # Pollutant movement prediction
+├── pollutant_predictor.py   # Pollutant movement prediction
 ├── TEMPO.py                  # NASA TEMPO data processing
 ├── tempo_all.py              # Enhanced multi-gas analyzer
 ├── GroundSensorAnalysis.py   # Ground sensor integration
-├── templates/                # Web interface templates
+├── templates/                # Legacy Jinja2 templates
 │   ├── index.html           # Main input interface
 │   ├── result.html          # Analysis results display
 │   └── route.html           # Route safety analysis
@@ -119,17 +124,28 @@ AERIS/
 
 ### Starting the Application
 
-1. **Start the FastAPI server**
+1. **Start the FastAPI backend**
 
    ```bash
    uvicorn api_server:app --reload --host 0.0.0.0 --port 8000
    ```
 
-2. **Access the application**
+2. **Start the Next.js frontend (recommended)**
 
-   Open your browser and navigate to `http://localhost:8000`
+   ```bash
+   cd frontend
+   # Ensure .env.local exists with NEXT_PUBLIC_API_URL=http://localhost:8000
+   npm install
+   npm run dev
+   ```
 
-### Web Interface
+   Open your browser at `http://localhost:3000`. The frontend calls the API at `NEXT_PUBLIC_API_URL` (default `http://localhost:8000`).
+
+3. **Legacy: use FastAPI-only UI**
+
+   With the backend running, you can also open `http://localhost:8000` to use the Jinja2-rendered pages (GET `/`, POST `/analyze`, POST `/route`).
+
+### Web Interface (Next.js)
 
 #### Main Analysis (`/`)
 
@@ -137,12 +153,13 @@ AERIS/
 - Select gases to analyze (NO₂, CH₂O, AI, PM, O₃)
 - Configure analysis radius and parameters
 - Enable weather integration and pollutant movement prediction
+- Submit to view results at `/results`
 
 #### Route Analysis (`/route`)
 
 - Assess air quality along travel routes
 - Get pollution exposure scores for different route options
-- View interactive maps with pollution hotspots
+- View interactive maps with pollution hotspots (dark theme)
 - Receive safety recommendations for travel
 
 ### API Endpoints
@@ -153,7 +170,8 @@ The system provides RESTful API endpoints for programmatic access:
 - `GET /api/pollutant_movement` - Pollutant dispersion prediction
 - `GET /api/combined_analysis` - Integrated satellite and weather analysis
 - `GET /api/hotspots` - Pollution hotspot data in GeoJSON format
-- `POST /api/analyze` - Custom air quality analysis
+- `POST /api/analyze` - Full air quality analysis (JSON: images, weather, predictions, alerts, hotspots)
+- `POST /api/route/analyze` - Route safety analysis (JSON: routes, hotspots_geojson, status)
 
 ## Configuration
 

@@ -46,6 +46,7 @@ flowchart LR
 | Concern | Storage | Usage |
 |--------|---------|--------|
 | Users, saved routes, NetCDF metadata, pollution grid | PostgreSQL + PostGIS | Auth, CRUD, spatial queries |
+| Alert log, route exposure history | PostgreSQL | Audit, analytics, and Alerts & Personalization Engine (see [ALERTS_AND_PERSONALIZATION.md](ALERTS_AND_PERSONALIZATION.md)) |
 | Weather, pollutant predictions, hotspot/analysis/route cache | Redis | TTL cache in front of external APIs and heavy compute |
 | NetCDF blobs | S3 or MinIO (env-driven) | Store/retrieve by bucket path; metadata in DB |
 
@@ -56,14 +57,14 @@ flowchart LR
 ### 3.1 PostgreSQL + PostGIS
 
 - **Extensions:** `postgis`, `postgis_topology`; default SRID **4326 (WGS 84)**.
-- **Tables:** `users`, `saved_routes`, `pollution_grid` (with `geom` and GIST index), `netcdf_files`.
+- **Tables:** `users`, `saved_routes` (includes `last_upes_score`, `last_upes_updated_at` for UPES-based exposure), `pollution_grid` (with `geom` and GIST index), `route_exposure_history`, `alert_log`, `netcdf_files`. The tables `route_exposure_history` and `alert_log` support the [Alerts & Personalization Engine](ALERTS_AND_PERSONALIZATION.md).
 - **ORM:** SQLAlchemy 2.x (async) + GeoAlchemy2; migrations via Alembic.
 - **FastAPI:** Lifespan ensures PostGIS extensions exist; `get_db()` yields an async session for routes that need the DB.
 
 ### 3.2 Redis
 
-- **Role:** Optional cache (when `REDIS_URL` is set). Reduces repeat calls to WeatherAPI and caches pollutant movement and related results.
-- **Pattern:** Check cache by key; on miss, call external API or run computation, then `SETEX` with TTL. Example keys: `weather:{lat}:{lon}:{days}`, `pollutant_movement:{lat}:{lon}` (e.g. 600 s TTL).
+- **Role:** Optional cache (when `REDIS_URL` is set). Reduces repeat calls to WeatherAPI and caches pollutant movement, route results, and pipeline timestamps.
+- **Pattern:** Check cache by key; on miss, call external API or run computation, then `SETEX` with TTL. Example keys: `weather:{lat}:{lon}:{days}`, `pollutant_movement:{lat}:{lon}` (e.g. 600 s TTL); `tempo:last_update` and `upes:last_update` (ingestion/UPES pipeline timestamps, TTL e.g. 3600 s); `route_opt:{start_lat}:{start_lon}:{end_lat}:{end_lon}:{mode}` for pollution-optimized route results (see [ROUTE_OPTIMIZATION_ENGINE.md](ROUTE_OPTIMIZATION_ENGINE.md)).
 - **FastAPI:** Connection created at startup and stored on `app.state.redis`; closed on shutdown.
 
 ### 3.3 Object Storage (S3 / MinIO)

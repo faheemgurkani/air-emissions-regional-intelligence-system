@@ -11,7 +11,7 @@ app = Celery(
     "aeris",
     broker=broker,
     backend=broker,
-    include=["tasks.pollution_tasks"],
+    include=["tasks.pollution_tasks", "tasks.alert_tasks"],
 )
 
 app.conf.update(
@@ -22,10 +22,22 @@ app.conf.update(
     enable_utc=True,
 )
 
-# Celery Beat: run fetch_tempo_hourly every hour at minute 0
+# Celery Beat: fetch_tempo_hourly at :00; compute_upes_hourly at :15; UPES route scores at :20; alert pipeline at :25
 app.conf.beat_schedule = {
     "fetch-tempo-hourly": {
         "task": "tasks.pollution_tasks.fetch_tempo_hourly",
         "schedule": crontab(minute=0),
+    },
+    "compute-upes-hourly": {
+        "task": "tasks.pollution_tasks.compute_upes_hourly",
+        "schedule": crontab(minute=15),
+    },
+    "compute-saved-route-upes-scores": {
+        "task": "tasks.alert_tasks.compute_saved_route_upes_scores",
+        "schedule": crontab(minute=20),
+    },
+    "run-alert-pipeline": {
+        "task": "tasks.alert_tasks.run_alert_pipeline",
+        "schedule": crontab(minute=25),
     },
 }

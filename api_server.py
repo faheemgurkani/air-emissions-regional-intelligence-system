@@ -7,9 +7,11 @@ from typing import List, Dict, Optional, Tuple, Any
 import numpy as np
 import xarray as xr
 from fastapi import Depends, FastAPI, Request, Form, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime, timedelta, timezone
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from geopy.geocoders import Nominatim
@@ -26,15 +28,17 @@ from weather_service import get_weather_data, get_pollutant_movement_prediction
 from groq_service import generate_weather_interpretation, generate_prediction_interpretation
 from cache import get_weather_cached, get_pollutant_movement_cached
 from database.session import get_db
-from database.models import PollutionGrid, SavedRoute, User
+from database.models import AlertLog, PollutionGrid, SavedRoute, User
 from geoalchemy2 import WKTElement
 from database.schemas import (
+    AlertLogResponse,
     SavedRouteCreate,
     SavedRouteResponse,
     Token,
     UserLogin,
     UserRegister,
     UserResponse,
+    UserUpdate,
 )
 from auth import create_access_token, get_current_user, hash_password, verify_password
 from config import settings as app_settings
@@ -93,6 +97,13 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 app = FastAPI(title="TEMPO Pollution Viewer", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
@@ -1181,7 +1192,12 @@ async def analyze_route(
     destination: str = Form(...),
     gases: Optional[str] = Form(default="NO2,AI"),
     grid_step_km: int = Form(default=20),
+    use_optimized: Optional[str] = Form(default=None),
+    route_mode: Optional[str] = Form(default="commute"),
 ):
+    use_optimized_bool = use_optimized is True or (
+        isinstance(use_optimized, str) and use_optimized.strip().lower() in ("true", "1", "yes")
+    )
     origin_name = origin.strip()
     dest_name = destination.strip()
     ocoords = robust_geocode(origin_name)
@@ -1215,8 +1231,50 @@ async def analyze_route(
             gas_list, center_lat, center_lon, radius, origin_name, file_overrides=overrides
         )
 
-        osrm_routes = fetch_osrm_routes(o_lat, o_lon, d_lat, d_lon, alternatives=True)
         routes_payload = []
+        status_text = ""
+        if use_optimized_bool and getattr(app_settings, "route_optimization_enabled", True):
+            def _optimized_routes():
+                from services.route_optimization.graph_builder import build_weighted_graph
+                from services.route_optimization.pathfinding import k_shortest_paths
+                import math
+                buffer_km = getattr(app_settings, "route_osm_buffer_km", 3.0)
+                deg_per_km_lat = 1.0 / 111.0
+                deg_per_km_lon = 1.0 / (111.0 * max(0.01, math.cos(math.radians(center_lat))))
+                north = center_lat + buffer_km * deg_per_km_lat
+                south = center_lat - buffer_km * deg_per_km_lat
+                east = center_lon + buffer_km * deg_per_km_lon
+                west = center_lon - buffer_km * deg_per_km_lon
+                mode = (route_mode or "commute").strip().lower()
+                G = build_weighted_graph(north, south, east, west, mode=mode)
+                return k_shortest_paths(G, o_lat, o_lon, d_lat, d_lon, k=3)
+            try:
+                import asyncio
+                opt_routes = await asyncio.get_event_loop().run_in_executor(None, _optimized_routes)
+                if opt_routes:
+                    for idx, r in enumerate(opt_routes):
+                        coords = r.get("geometry", {}).get("coordinates", [])
+                        latlon = [[float(c[1]), float(c[0])] for c in coords]
+                        routes_payload.append({
+                            "name": f"Optimized {idx+1}",
+                            "distance_km": r.get("distance_km", 0),
+                            "duration_min": r.get("time_min"),
+                            "coords": latlon,
+                            "score": r.get("exposure", 0),
+                            "danger": [],
+                            "severity": [],
+                            "blocked": False,
+                            "safest": idx == 0,
+                        })
+                    if routes_payload:
+                        routes_payload[0]["safest"] = True
+                        status_text = "Pollution-optimized route (UPES + OSM)"
+            except Exception:
+                pass
+        if not routes_payload:
+            osrm_routes = fetch_osrm_routes(o_lat, o_lon, d_lat, d_lon, alternatives=True)
+        else:
+            osrm_routes = []
         if osrm_routes:
             hotspot_circles = build_hotspot_circles(gas_data)
             for idx, rdata in enumerate(osrm_routes):
@@ -1302,18 +1360,188 @@ async def route_alternate(
     destination: str = Query(...),
     gases: str = Query(default="NO2,AI"),
     grid_step_km: int = Query(default=20),
+    use_optimized: bool = Query(default=False),
+    route_mode: Optional[str] = Query(default="commute"),
 ):
-    return await analyze_route(request, db, origin, destination, gases, grid_step_km)
+    return await analyze_route(request, db, origin, destination, gases, grid_step_km, use_optimized, route_mode)
+
+
+@app.post("/api/route/analyze")
+async def api_route_analyze(
+    db: AsyncSession = Depends(get_db),
+    origin: str = Form(...),
+    destination: str = Form(...),
+    gases: Optional[str] = Form(default="NO2,AI"),
+    grid_step_km: int = Form(default=20),
+    use_optimized: Optional[str] = Form(default=None),
+    route_mode: Optional[str] = Form(default="commute"),
+):
+    """Return route analysis as JSON for the Next.js frontend."""
+    use_optimized_bool = use_optimized is True or (
+        isinstance(use_optimized, str) and use_optimized.strip().lower() in ("true", "1", "yes")
+    )
+    origin_name = origin.strip()
+    dest_name = destination.strip()
+    ocoords = robust_geocode(origin_name)
+    dcoords = robust_geocode(dest_name)
+    if not ocoords or not dcoords:
+        return JSONResponse(
+            {"error": "Could not geocode origin/destination. Please try different names."},
+            status_code=400,
+        )
+    o_lat, o_lon = ocoords
+    d_lat, d_lon = dcoords
+
+    gas_list = [g.strip().upper() for g in gases.split(',') if g.strip()]
+    gas_list = [g for g in gas_list if g in VARIABLE_NAMES]
+    if not gas_list:
+        gas_list = ['NO2']
+
+    pad_deg = 1.0
+    lat_min = min(o_lat, d_lat) - pad_deg
+    lat_max = max(o_lat, d_lat) + pad_deg
+    lon_min = min(o_lon, d_lon) - pad_deg
+    lon_max = max(o_lon, d_lon) + pad_deg
+
+    center_lat = (o_lat + d_lat) / 2
+    center_lon = (o_lon + d_lon) / 2
+    radius = max(abs(lat_max - lat_min), abs(lon_max - lon_min)) / 2
+    overrides, temp_paths = await resolve_netcdf_paths_for_gases(db, gas_list)
+    try:
+        gas_data, _, _ = load_and_analyze_for_gases(
+            gas_list, center_lat, center_lon, radius, origin_name, file_overrides=overrides
+        )
+
+        routes_payload = []
+        status_text = ""
+        osrm_routes = None
+        if use_optimized_bool and getattr(app_settings, "route_optimization_enabled", True):
+            def _optimized_routes():
+                from services.route_optimization.graph_builder import build_weighted_graph
+                from services.route_optimization.pathfinding import k_shortest_paths
+                import math
+                buffer_km = getattr(app_settings, "route_osm_buffer_km", 3.0)
+                deg_per_km_lat = 1.0 / 111.0
+                deg_per_km_lon = 1.0 / (111.0 * max(0.01, math.cos(math.radians(center_lat))))
+                north = center_lat + buffer_km * deg_per_km_lat
+                south = center_lat - buffer_km * deg_per_km_lat
+                east = center_lon + buffer_km * deg_per_km_lon
+                west = center_lon - buffer_km * deg_per_km_lon
+                mode = (route_mode or "commute").strip().lower()
+                G = build_weighted_graph(north, south, east, west, mode=mode)
+                return k_shortest_paths(G, o_lat, o_lon, d_lat, d_lon, k=3)
+            try:
+                import asyncio
+                opt_routes = await asyncio.get_event_loop().run_in_executor(None, _optimized_routes)
+                if opt_routes:
+                    for idx, r in enumerate(opt_routes):
+                        coords = r.get("geometry", {}).get("coordinates", [])
+                        latlon = [[float(c[1]), float(c[0])] for c in coords]
+                        routes_payload.append({
+                            "name": f"Optimized {idx+1}",
+                            "distance_km": r.get("distance_km", 0),
+                            "duration_min": r.get("time_min"),
+                            "coords": latlon,
+                            "score": r.get("exposure", 0),
+                            "danger": [],
+                            "severity": [],
+                            "blocked": False,
+                            "safest": idx == 0,
+                        })
+                    if routes_payload:
+                        routes_payload[0]["safest"] = True
+                        status_text = "Pollution-optimized route (UPES + OSM)"
+            except Exception:
+                pass
+        if not routes_payload:
+            osrm_routes = fetch_osrm_routes(o_lat, o_lon, d_lat, d_lon, alternatives=True)
+        if osrm_routes:
+            hotspot_circles = build_hotspot_circles(gas_data)
+            for idx, rdata in enumerate(osrm_routes):
+                geom = rdata.get('geometry', {})
+                coords = geom.get('coordinates') or []
+                latlon_coords = [[float(c[1]), float(c[0])] for c in coords]
+                samples = resample_polyline_km(latlon_coords, max(5.0, float(grid_step_km)))
+                score, danger_pts, per_point_sev, blocked = score_route_exposure(
+                    samples, gas_data, gas_list, proximity_km=10.0, hotspot_circles=hotspot_circles,
+                    hard_block_threshold=3, hotspot_extra_buffer_km=3.0
+                )
+                routes_payload.append({
+                    "name": f"Route {idx+1}",
+                    "distance_km": float(rdata.get('distance', 0.0)) / 1000.0,
+                    "duration_min": float(rdata.get('duration', 0.0)) / 60.0,
+                    "coords": latlon_coords,
+                    "score": score,
+                    "danger": danger_pts,
+                    "severity": per_point_sev,
+                    "blocked": blocked,
+                })
+            if routes_payload:
+                unblocked = [r for r in routes_payload if not r.get('blocked')]
+                candidates = unblocked if unblocked else routes_payload
+                candidates.sort(key=lambda x: (x['score'], x['distance_km']))
+                safest = candidates[0]
+                safest["safest"] = True
+                routes_payload = [safest]
+                status_text = (
+                    f"Safest route selected (exposure score {safest['score']:.0f})" if not safest.get('blocked')
+                    else f"All routes near high pollution; least exposure selected (score {safest['score']:.0f})"
+                )
+            else:
+                status_text = "No road routes available; falling back to straight line"
+        elif not routes_payload:
+            samples = sample_line(o_lat, o_lon, d_lat, d_lon, max(5.0, float(grid_step_km)))
+            hotspot_circles = build_hotspot_circles(gas_data)
+            score, danger_pts, per_point_sev, blocked = score_route_exposure(
+                samples, gas_data, gas_list, proximity_km=10.0, hotspot_circles=hotspot_circles,
+                hard_block_threshold=3, hotspot_extra_buffer_km=3.0
+            )
+            routes_payload = [{
+                "name": "Direct",
+                "distance_km": haversine_km(o_lat, o_lon, d_lat, d_lon),
+                "duration_min": None,
+                "coords": [[lat, lon] for lat, lon in samples],
+                "score": score,
+                "danger": danger_pts,
+                "severity": per_point_sev,
+                "safest": True,
+                "blocked": blocked,
+            }]
+            status_text = "Road routing unavailable; evaluated direct path"
+
+        hotspots_geojson = gather_hotspots_geojson(gas_data, limit=50)
+
+        return {
+            "origin_name": origin_name,
+            "dest_name": dest_name,
+            "origin": {"lat": o_lat, "lon": o_lon},
+            "dest": {"lat": d_lat, "lon": d_lon},
+            "gases": gas_list,
+            "status_text": status_text,
+            "routes": routes_payload,
+            "hotspots_geojson": hotspots_geojson,
+            "grid_step_km": grid_step_km,
+            "alt_available": False,
+        }
+    finally:
+        for p in temp_paths:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
 
 
 @app.post("/api/analyze")
 async def analyze_api(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     location: Optional[str] = Form(default=""),
     latitude: Optional[str] = Form(default=""),
     longitude: Optional[str] = Form(default=""),
     radius: float = Form(default=0.3),
     gases: Optional[str] = Form(default="NO2"),
+    include_weather: bool = Form(default=True),
+    include_pollutant_prediction: bool = Form(default=True),
 ):
     location_name = location.strip() or "Custom Location"
     lat_val = None
@@ -1342,14 +1570,82 @@ async def analyze_api(
             gas_list, lat_val, lon_val, radius, location_name, file_overrides=overrides
         )
         image_url = visualize_multi_gas(gas_data, location_name, lat_val, lon_val, radius)
+
+        per_gas_images = []
+        for gas in gas_list:
+            info = gas_data.get(gas)
+            if info and info.get('datatree') is not None:
+                url = visualize_tripanel_for_gas(
+                    gas, info['datatree'], all_hotspots, info['alerts'], POLLUTION_THRESHOLDS.get(gas, {})
+                )
+                per_gas_images.append({"gas": gas, "url": url})
+
+        severity = max([a['severity'] for a in all_alerts], default=0)
+        severity_to_status = {
+            0: 'Good', 1: 'Moderate', 2: 'Unhealthy for Sensitive Groups',
+            3: 'Very Unhealthy', 4: 'Hazardous'
+        }
+        overall_status = severity_to_status.get(severity, 'Good')
+
+        enriched_hotspots = []
+        for h in all_hotspots[:10]:
+            h_with_place = dict(h)
+            place = reverse_geocode(h_with_place['center_lat'], h_with_place['center_lon'])
+            if place:
+                h_with_place['place'] = place
+            enriched_hotspots.append(h_with_place)
+
+        weather_data = None
+        pollutant_predictions = None
+        weather_interpretation = None
+        prediction_interpretation = None
+        if include_weather or include_pollutant_prediction:
+            try:
+                redis = getattr(request.app.state, "redis", None)
+                weather_data = await get_weather_cached(redis, lat_val, lon_val, 1, get_weather_data)
+                if "error" in (weather_data or {}):
+                    weather_data = None
+                elif weather_data:
+                    try:
+                        weather_interpretation = generate_weather_interpretation(weather_data, location_name)
+                    except Exception:
+                        weather_interpretation = None
+            except Exception:
+                weather_data = None
+
+        if include_pollutant_prediction and weather_data and "error" not in (weather_data or {}):
+            try:
+                redis = getattr(request.app.state, "redis", None)
+                pollutant_resp = await get_pollutant_movement_cached(
+                    redis, lat_val, lon_val, get_pollutant_movement_prediction
+                )
+                if "error" not in (pollutant_resp or {}):
+                    pollutant_predictions = pollutant_resp.get("predictions_next_3h", [])
+                    if pollutant_predictions:
+                        try:
+                            prediction_interpretation = generate_prediction_interpretation(
+                                pollutant_predictions, location_name
+                            )
+                        except Exception:
+                            prediction_interpretation = None
+            except Exception:
+                pollutant_predictions = None
+
         return {
             "location": location_name,
-            "coordinates": {"latitude": lat_val, "longitude": lon_val},
+            "coords": {"lat": lat_val, "lon": lon_val},
+            "radius": radius,
             "gases": gas_list,
-            "overall_status": max([a['severity'] for a in all_alerts], default=0),
+            "overall_status": overall_status,
             "alerts": all_alerts,
-            "hotspots": all_hotspots,
+            "hotspots": enriched_hotspots,
+            "units": UNITS,
             "image_url": image_url,
+            "per_gas_images": per_gas_images,
+            "weather_data": weather_data,
+            "pollutant_predictions": pollutant_predictions,
+            "weather_interpretation": weather_interpretation,
+            "prediction_interpretation": prediction_interpretation,
         }
     finally:
         for p in temp_paths:
@@ -1419,6 +1715,276 @@ async def api_hotspots(
 
 
 # -----------------------------
+# UPES (Unified Pollution Exposure Score) API
+# -----------------------------
+@app.get("/api/upes/latest")
+async def api_upes_latest(request: Request):
+    """
+    Return latest UPES run: timestamp, last_update from Redis, paths to latest rasters,
+    and summary stats from latest log file.
+    """
+    try:
+        from services.upes.storage import upes_output_base
+        base = upes_output_base()
+        logs_dir = base / "logs"
+        if not logs_dir.exists():
+            return JSONResponse({
+                "timestamp": None,
+                "last_update": None,
+                "paths": {},
+                "satellite_score": None,
+                "humidity_factor": None,
+                "wind_factor": None,
+                "traffic_factor": None,
+                "final_score": None,
+            })
+        log_files = sorted(logs_dir.glob("upes_*.json"), key=os.path.getmtime, reverse=True)
+        last_update = None
+        try:
+            redis = getattr(request.app.state, "redis", None)
+            if redis:
+                last_update = await redis.get("upes:last_update")
+                if last_update:
+                    last_update = last_update.decode() if isinstance(last_update, bytes) else last_update
+        except Exception:
+            pass
+        payload = {
+            "timestamp": None,
+            "last_update": last_update,
+            "paths": {},
+            "satellite_score": None,
+            "humidity_factor": None,
+            "wind_factor": None,
+            "traffic_factor": None,
+            "final_score": None,
+        }
+        if log_files:
+            with open(log_files[0]) as f:
+                data = json.load(f)
+            payload["timestamp"] = data.get("timestamp")
+            payload["satellite_score"] = data.get("satellite_score")
+            payload["humidity_factor"] = data.get("humidity_factor")
+            payload["wind_factor"] = data.get("wind_factor")
+            payload["traffic_factor"] = data.get("traffic_factor")
+            payload["final_score"] = data.get("final_score")
+            ts_raw = data.get("timestamp", "")
+            if ts_raw and len(ts_raw) >= 13:
+                ts = ts_raw[:10].replace("-", "") + "_" + ts_raw[11:13]
+            else:
+                ts = ""
+            sat_dir = base / "hourly_scores" / "satellite_score"
+            final_dir = base / "hourly_scores" / "final_score"
+            if ts:
+                sat_path = sat_dir / f"satellite_score_{ts}.tif"
+                final_path = final_dir / f"final_score_{ts}.tif"
+                if sat_path.exists():
+                    payload["paths"]["satellite_score"] = str(sat_path)
+                if final_path.exists():
+                    payload["paths"]["final_score"] = str(final_path)
+        return JSONResponse(payload)
+    except Exception as e:
+        return JSONResponse({"detail": str(e)}, status_code=500)
+
+
+@app.get("/api/upes/grid")
+async def api_upes_grid(
+    timestamp: Optional[str] = Query(default=None),
+    bbox: Optional[str] = Query(default=None),
+):
+    """
+    Return UPES summary or path for a given timestamp. If timestamp omitted, same as latest.
+    bbox optional (comma-separated west,south,east,north) for future subset.
+    """
+    try:
+        from services.upes.storage import upes_output_base
+        base = upes_output_base()
+        if not timestamp:
+            logs_dir = base / "logs"
+            if not logs_dir.exists():
+                return JSONResponse({"timestamp": None, "paths": {}, "detail": "No UPES data"})
+            log_files = sorted(logs_dir.glob("upes_*.json"), key=os.path.getmtime, reverse=True)
+            if not log_files:
+                return JSONResponse({"timestamp": None, "paths": {}, "detail": "No UPES data"})
+            with open(log_files[0]) as f:
+                data = json.load(f)
+            timestamp = data.get("timestamp", "")
+        if timestamp and len(timestamp) >= 13:
+            ts_clean = timestamp[:10].replace("-", "") + "_" + timestamp[11:13]
+        else:
+            return JSONResponse({"timestamp": timestamp, "paths": {}, "detail": "Invalid timestamp"})
+        sat_path = base / "hourly_scores" / "satellite_score" / f"satellite_score_{ts_clean}.tif"
+        final_path = base / "hourly_scores" / "final_score" / f"final_score_{ts_clean}.tif"
+        payload = {"timestamp": timestamp, "paths": {}}
+        if sat_path.exists():
+            payload["paths"]["satellite_score"] = str(sat_path)
+        if final_path.exists():
+            payload["paths"]["final_score"] = str(final_path)
+        return JSONResponse(payload)
+    except Exception as e:
+        return JSONResponse({"detail": str(e)}, status_code=500)
+
+
+@app.get("/api/upes/heatmap")
+async def api_upes_heatmap():
+    """
+    Return latest UPES final score as a PNG heatmap (and high-risk contour if threshold set).
+    """
+    try:
+        from pathlib import Path
+        from services.upes.storage import upes_output_base
+        from services.upes.visualization import render_upes_heatmap
+        base = upes_output_base()
+        final_dir = base / "hourly_scores" / "final_score"
+        if not final_dir.exists():
+            return Response(content=b"", status_code=404)
+        tifs = sorted(final_dir.glob("final_score_*.tif"), key=os.path.getmtime, reverse=True)
+        if not tifs:
+            return Response(content=b"", status_code=404)
+        _, png_bytes = render_upes_heatmap(tifs[0], output_path=None)
+        if png_bytes is None:
+            return Response(content=b"", status_code=500)
+        return Response(content=png_bytes, media_type="image/png")
+    except Exception as e:
+        return Response(content=str(e).encode(), status_code=500)
+
+
+# -----------------------------
+# Route optimization (pollution-aware OSM + UPES)
+# -----------------------------
+@app.get("/api/route/optimized")
+async def api_route_optimized(
+    request: Request,
+    start_lat: float = Query(..., description="Origin latitude"),
+    start_lon: float = Query(..., description="Origin longitude"),
+    end_lat: float = Query(..., description="Destination latitude"),
+    end_lon: float = Query(..., description="Destination longitude"),
+    mode: Optional[str] = Query("commute", description="Mode: commute, jogger, cyclist"),
+    alternatives: int = Query(1, ge=1, le=5, description="Number of alternative routes"),
+):
+    """
+    Pollution-aware route: OSM graph with UPES-weighted edges, mode-specific modifiers.
+    Returns routes with geometry, exposure, distance_km, time_min, cost.
+    """
+    import math
+    from cache import cache_get, cache_set, key_route_optimized
+
+    if not getattr(app_settings, "route_optimization_enabled", True):
+        return JSONResponse(
+            {"detail": "Route optimization is disabled", "routes": []},
+            status_code=503,
+        )
+    mode = (mode or "commute").strip().lower()
+    cache_key = key_route_optimized(start_lat, start_lon, end_lat, end_lon, mode)
+    redis = getattr(request.app.state, "redis", None)
+    ttl = getattr(app_settings, "route_result_cache_ttl", 300)
+    cached = await cache_get(redis, cache_key)
+    if cached is not None:
+        return JSONResponse(cached)
+
+    def _compute():
+        from services.route_optimization.graph_builder import build_weighted_graph
+        from services.route_optimization.pathfinding import k_shortest_paths, shortest_path_optimized
+
+        buffer_km = getattr(app_settings, "route_osm_buffer_km", 3.0)
+        center_lat = (start_lat + end_lat) / 2.0
+        center_lon = (start_lon + end_lon) / 2.0
+        deg_per_km_lat = 1.0 / 111.0
+        deg_per_km_lon = 1.0 / (111.0 * max(0.01, math.cos(math.radians(center_lat))))
+        north = center_lat + buffer_km * deg_per_km_lat
+        south = center_lat - buffer_km * deg_per_km_lat
+        east = center_lon + buffer_km * deg_per_km_lon
+        west = center_lon - buffer_km * deg_per_km_lon
+        G = build_weighted_graph(north, south, east, west, mode=mode)
+        if alternatives > 1:
+            routes = k_shortest_paths(G, start_lat, start_lon, end_lat, end_lon, k=alternatives)
+        else:
+            route = shortest_path_optimized(G, start_lat, start_lon, end_lat, end_lon)
+            routes = [route] if route else []
+        return {"routes": routes}
+
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _compute)
+        if result["routes"]:
+            await cache_set(redis, cache_key, result, ttl)
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse(
+            {"detail": str(e), "routes": []},
+            status_code=500,
+        )
+
+
+@app.post("/api/route/optimized")
+async def api_route_optimized_post(request: Request):
+    """
+    POST body: { "origin": { "lat", "lon" }, "destination": { "lat", "lon" }, "mode": "jogger", "alternatives": 2 }.
+    """
+    from cache import cache_get, cache_set, key_route_optimized
+
+    if not getattr(app_settings, "route_optimization_enabled", True):
+        return JSONResponse(
+            {"detail": "Route optimization is disabled", "routes": []},
+            status_code=503,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "Invalid JSON body", "routes": []}, status_code=400)
+    origin = body.get("origin") or {}
+    destination = body.get("destination") or {}
+    start_lat = float(origin.get("lat", 0))
+    start_lon = float(origin.get("lon", 0))
+    end_lat = float(destination.get("lat", 0))
+    end_lon = float(destination.get("lon", 0))
+    mode = (body.get("mode") or "commute").strip().lower()
+    alternatives = int(body.get("alternatives", 1))
+    alternatives = max(1, min(5, alternatives))
+    cache_key = key_route_optimized(start_lat, start_lon, end_lat, end_lon, mode)
+    redis = getattr(request.app.state, "redis", None)
+    ttl = getattr(app_settings, "route_result_cache_ttl", 300)
+    cached = await cache_get(redis, cache_key)
+    if cached is not None:
+        return JSONResponse(cached)
+
+    def _compute():
+        import math
+        from services.route_optimization.graph_builder import build_weighted_graph
+        from services.route_optimization.pathfinding import k_shortest_paths, shortest_path_optimized
+
+        buffer_km = getattr(app_settings, "route_osm_buffer_km", 3.0)
+        center_lat = (start_lat + end_lat) / 2.0
+        center_lon = (start_lon + end_lon) / 2.0
+        deg_per_km_lat = 1.0 / 111.0
+        deg_per_km_lon = 1.0 / (111.0 * max(0.01, math.cos(math.radians(center_lat))))
+        north = center_lat + buffer_km * deg_per_km_lat
+        south = center_lat - buffer_km * deg_per_km_lat
+        east = center_lon + buffer_km * deg_per_km_lon
+        west = center_lon - buffer_km * deg_per_km_lon
+        G = build_weighted_graph(north, south, east, west, mode=mode)
+        if alternatives > 1:
+            routes = k_shortest_paths(G, start_lat, start_lon, end_lat, end_lon, k=alternatives)
+        else:
+            route = shortest_path_optimized(G, start_lat, start_lon, end_lat, end_lon)
+            routes = [route] if route else []
+        return {"routes": routes}
+
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _compute)
+        if result["routes"]:
+            await cache_set(redis, cache_key, result, ttl)
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse(
+            {"detail": str(e), "routes": []},
+            status_code=500,
+        )
+
+
+# -----------------------------
 # Auth and saved routes
 # -----------------------------
 @app.post("/auth/register", response_class=JSONResponse)
@@ -1451,6 +2017,44 @@ async def login(body: UserLogin, db: AsyncSession = Depends(get_db)):
 @app.get("/auth/me", response_class=JSONResponse)
 async def auth_me(current_user: User = Depends(get_current_user)):
     return UserResponse.model_validate(current_user)
+
+
+@app.patch("/auth/me", response_class=JSONResponse)
+async def update_me(
+    body: UserUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update current user's notification_preferences and/or exposure_sensitivity_level."""
+    if body.notification_preferences is not None:
+        current_user.notification_preferences = body.notification_preferences
+    if body.exposure_sensitivity_level is not None:
+        current_user.exposure_sensitivity_level = body.exposure_sensitivity_level
+    db.add(current_user)
+    await db.commit()
+    await db.refresh(current_user)
+    return UserResponse.model_validate(current_user)
+
+
+@app.get("/api/alerts")
+async def list_alerts(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    route_id: Optional[int] = Query(None),
+    alert_type: Optional[str] = Query(None),
+    days: int = Query(7, ge=1, le=90),
+):
+    """Return current user's alerts from alert_log (last N days). Optional filter by route_id, alert_type."""
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    q = select(AlertLog).where(AlertLog.user_id == current_user.id, AlertLog.created_at >= since)
+    if route_id is not None:
+        q = q.where(AlertLog.route_id == route_id)
+    if alert_type is not None:
+        q = q.where(AlertLog.alert_type == alert_type)
+    q = q.order_by(AlertLog.created_at.desc())
+    result = await db.execute(q)
+    rows = result.scalars().all()
+    return [AlertLogResponse.model_validate(r).model_dump(mode="json") for r in rows]
 
 
 @app.post("/api/saved-routes", response_class=JSONResponse)

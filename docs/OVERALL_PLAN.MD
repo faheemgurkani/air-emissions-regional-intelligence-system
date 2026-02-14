@@ -362,7 +362,11 @@ Based on maturity and impact:
 1. ✅ Unified Pollution Exposure Score
 2. ✅ PostGIS spatial storage
 3. ✅ Hourly recompute engine
-4. 🔄 Traffic integration
-5. 🔄 Pollution-aware A* routing
+4. 🔄 Traffic integration — Planned
+5. ✅ Pollution-aware routing (OSMnx + Dijkstra) — Done
+6. ✅ Alerts and personalizations (n8n workflow) — Done
+7. 🔄 FastAPI endpoints + WebSocket push — Partial (endpoints done; WebSocket planned)
+
+For the authoritative roadmap and as-built architecture, see [PRODUCTION_IMPLEMENTATION_PLAN.md](PRODUCTION_IMPLEMENTATION_PLAN.md).
 
 ---

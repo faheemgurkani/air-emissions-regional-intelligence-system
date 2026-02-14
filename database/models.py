@@ -62,6 +62,8 @@ class SavedRoute(Base):
     activity_type: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     last_computed_score: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
     last_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_upes_score: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
+    last_upes_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
 
     __table_args__ = (
@@ -72,6 +74,9 @@ class SavedRoute(Base):
     )
 
     user: Mapped["User"] = relationship("User", back_populates="saved_routes")
+    exposure_history: Mapped[list["RouteExposureHistory"]] = relationship(
+        "RouteExposureHistory", back_populates="route", cascade="all, delete-orphan"
+    )
 
 
 class PollutionGrid(Base):
@@ -88,6 +93,34 @@ class PollutionGrid(Base):
     __table_args__ = (
         CheckConstraint("severity_level >= 0", name="pollution_grid_severity_level_check"),
     )
+
+
+class RouteExposureHistory(Base):
+    __tablename__ = "route_exposure_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    route_id: Mapped[int] = mapped_column(Integer, ForeignKey("saved_routes.id", ondelete="CASCADE"), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    upes_score: Mapped[float] = mapped_column(Double, nullable=False)
+    max_upes_along_route: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
+    score_source: Mapped[str] = mapped_column(Text, nullable=False, server_default="upes")
+
+    route: Mapped["SavedRoute"] = relationship("SavedRoute", back_populates="exposure_history")
+
+
+class AlertLog(Base):
+    __tablename__ = "alert_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    route_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("saved_routes.id", ondelete="CASCADE"), nullable=True)
+    alert_type: Mapped[str] = mapped_column(Text, nullable=False)
+    score_before: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
+    score_after: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
+    threshold: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
+    metadata: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()")
+    notified_channels: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
 
 class NetcdfFile(Base):

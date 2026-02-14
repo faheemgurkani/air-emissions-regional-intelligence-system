@@ -1,8 +1,18 @@
 """
 Application configuration from environment variables.
 """
-from typing import Optional
+from typing import Dict, Optional
 from pydantic_settings import BaseSettings
+
+
+# UPES gas weights (default); sum should be 1.0
+UPES_DEFAULT_WEIGHTS: Dict[str, float] = {
+    "NO2": 0.3,
+    "PM": 0.35,
+    "O3": 0.2,
+    "CH2O": 0.1,
+    "AI": 0.05,
+}
 
 
 class Settings(BaseSettings):
@@ -38,6 +48,32 @@ class Settings(BaseSettings):
     # Existing
     weather_api_key: Optional[str] = None
     groq_api_key: Optional[str] = None
+
+    # UPES (Unified Pollution Exposure Score)
+    upes_output_base: Optional[str] = None  # default: outputs/ under project root
+    upes_grid_resolution_deg: float = 0.05  # degrees per cell
+    upes_bbox_west: Optional[float] = None  # override TEMPO bbox
+    upes_bbox_south: Optional[float] = None
+    upes_bbox_east: Optional[float] = None
+    upes_bbox_north: Optional[float] = None
+    upes_traffic_alpha: float = 0.1  # TF = 1 + alpha * traffic_density, in [0.05, 0.2]
+    upes_ema_lambda: Optional[float] = 0.6  # None = disable EMA
+    upes_alert_threshold: float = 0.5  # FinalScore > threshold = high-risk
+    upes_enabled: bool = True  # set False to skip compute_upes_hourly
+
+    # Route optimization (pollution-aware OSM graph)
+    route_optimization_enabled: bool = True
+    route_osm_buffer_km: float = 3.0  # bbox buffer around origin/dest for OSM fetch
+    route_result_cache_ttl: int = 300  # seconds
+    route_graph_cache_ttl: int = 600  # seconds for OSM graph by bbox
+
+    # Alerts & Personalization
+    alerts_enabled: bool = True
+    alerts_deterioration_base_pct: float = 0.15  # 15% for Normal; scaled by sensitivity
+    alerts_hazard_threshold: float = 0.85  # UPES >= this along route = hazard
+    alerts_wind_speed_min_kph: float = 5.0
+    alerts_wind_angle_deg: float = 45.0  # wind toward route within this angle
+    alerts_n8n_webhook_url: Optional[str] = None
 
     class Config:
         env_file = ".env"

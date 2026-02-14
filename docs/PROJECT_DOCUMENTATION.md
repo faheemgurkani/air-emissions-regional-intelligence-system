@@ -34,7 +34,7 @@ The system follows a **modular, layered architecture** with clear separation of 
 | Layer | Components | Description |
 |-------|-------------|-------------|
 | **Web Server** | FastAPI + Uvicorn | Serves web dashboard and handles all HTTP/API requests |
-| **Frontend** | Jinja2 templates, CSS, Leaflet.js | Renders UI, forms, results, and interactive maps |
+| **Frontend** | Next.js (App Router), React, Leaflet.js, dark B&W theme | Primary UI; runs separately (e.g. port 3000), calls FastAPI via `NEXT_PUBLIC_API_URL`. Legacy Jinja2 templates remain for fallback. |
 | **Computation** | NumPy, SciPy, Xarray | NASA TEMPO data parsing, clustering, and analysis |
 | **Visualization** | Matplotlib, Cartopy | Pollution heatmaps, tripanel figures, geospatial overlays |
 | **AI Services** | GROQ API (Llama 3.1 8B Instant) | Concise, actionable interpretations and commute advice |
@@ -54,7 +54,7 @@ The system follows a **modular, layered architecture** with clear separation of 
 3. **Data pipeline** → NetCDF → xarray Datatree → quality filtering → hotspot detection → regional alerts. Optionally persist pollution grid cells to PostGIS when `PERSIST_POLLUTION_GRID=true`.
 4. **Visualization** → Multi-gas heatmaps + per-gas tripanel figures → saved to `static/outputs/`.
 5. **Optional** → Weather/pollutant movement (cached in Redis when available) → GROQ interpretations.
-6. **Response** → Rendered HTML (result/route) with images, alerts, hotspots, and map.
+6. **Response** → Next.js frontend receives JSON from `/api/analyze` and `/api/route/analyze`; images are loaded from FastAPI `/static/outputs/`. Legacy: rendered HTML (result/route) when using Jinja2 templates directly.
 
 ### 2.4 Directory and File Layout
 
@@ -63,7 +63,7 @@ air-emissions-regional-intelligence-system/
 ├── api_server.py              # Main FastAPI app: routes, analysis, visualization, routing, auth, saved-routes
 ├── config.py                  # Pydantic Settings: DB, Redis, JWT, object storage, feature flags
 ├── database/
-│   ├── models.py              # SQLAlchemy + GeoAlchemy2: User, SavedRoute, PollutionGrid, NetcdfFile
+│   ├── models.py              # SQLAlchemy + GeoAlchemy2: User, SavedRoute, PollutionGrid, RouteExposureHistory, AlertLog, NetcdfFile
 │   ├── session.py             # Async engine, get_db, init_db_extensions
 │   └── schemas.py             # Pydantic: UserRegister, Token, SavedRouteCreate, etc.
 ├── auth.py                    # Password hashing, JWT, get_current_user dependency
@@ -75,27 +75,55 @@ air-emissions-regional-intelligence-system/
 ├── weather_service.py         # WeatherAPI.com client; triggers pollutant prediction
 ├── groq_service.py            # GROQ API: weather & prediction interpretations
 ├── pollutant_predictor.py     # 3-hour pollutant movement from wind/humidity
-├── celery_app.py              # Celery app (Redis broker), Beat schedule: fetch_tempo_hourly
-├── tasks/
-│   └── pollution_tasks.py     # fetch_tempo_hourly, recompute_saved_route_exposure
+├── celery_app.py              # Celery app (Redis broker), Beat: fetch_tempo, compute_upes, UPES route scores, alert pipeline
 ├── services/
 │   ├── harmony_service.py     # Harmony: token, rangeset URL, submit, poll, download GeoTIFF
-│   └── raster_normalizer.py  # GeoTIFF → pollution_grid rows (WKT, severity)
+│   ├── raster_normalizer.py   # GeoTIFF → pollution_grid rows (WKT, severity)
+│   ├── upes/                  # Unified Pollution Exposure Score (parallel layer)
+│   │   ├── preprocessing.py  # Gas normalization, temporal alignment
+│   │   ├── core.py            # Satellite score, HDF, WTF, TF, EMA, final score
+│   │   ├── grid_aggregation.py # pollution_grid → regular grid per gas
+│   │   ├── storage.py         # GeoTIFF + JSON logs
+│   │   └── visualization.py   # Heatmap from final_score raster
+│   ├── route_optimization/    # Pollution-aware routing (OSMnx + UPES)
+│   │   ├── upes_sampling.py   # Sample UPES raster along line
+│   │   ├── weights.py        # Mode weights (α,β,γ) and mode_modifier
+│   │   ├── graph_builder.py   # OSM graph + edge weights
+│   │   └── pathfinding.py    # Shortest path, k-shortest, geometry/metrics
+│   └── alerts/               # Alerts & Personalization
+│       ├── constants.py      # Sensitivity scale and labels
+│       ├── route_exposure.py # UPES along saved route (mean/max)
+│       └── detection.py      # Deterioration, hazard, wind-shift, time-based
+├── tasks/
+│   ├── pollution_tasks.py     # fetch_tempo_hourly, recompute_saved_route_exposure, compute_upes_hourly
+│   └── alert_tasks.py        # compute_saved_route_upes_scores, run_alert_pipeline
 ├── pollution_utils.py         # Shared POLLUTION_THRESHOLDS, classify_pollution_level
+├── outputs/                   # UPES: hourly_scores/, logs/ (when upes_output_base unset)
 ├── TEMPO.py                   # Standalone: Harmony NO2 fetch + process + map (Madre wildfire)
 ├── tempo_all.py               # TempoMultiGasAnalyzer: multi-gas Harmony fetch + analysis
 ├── GroundSensorAnalysis.py    # EPA AirNow ground sensor integration (standalone)
-├── templates/
-│   ├── index.html             # Main form: location, coords, radius, gases, weather/prediction toggles
-│   ├── result.html            # Analysis results: images, alerts, hotspots, weather, map
-│   └── route.html             # Route safety: OSRM routes, exposure scoring, Leaflet map
+├── frontend/                   # Next.js app (primary frontend)
+│   ├── app/                    # App Router: layout, page (home), results/, route/
+│   ├── components/             # AnalyzeForm, RouteForm, ResultContent, ResultMap, RouteMap, RouteList
+│   ├── lib/api.ts              # API client (NEXT_PUBLIC_API_URL), analyzeFull, routeAnalyze, getHotspots
+│   └── .env.local              # NEXT_PUBLIC_API_URL (e.g. http://localhost:8000)
+├── templates/                  # Legacy Jinja2 (fallback)
+│   ├── index.html              # Main form: location, coords, radius, gases, weather/prediction toggles
+│   ├── result.html             # Analysis results: images, alerts, hotspots, weather, map
+│   └── route.html              # Route safety: OSRM routes, exposure scoring, Leaflet map
 ├── static/
-│   ├── style.css              # Shared styles
-│   └── outputs/               # Generated analysis images (gitignored)
+│   ├── style.css               # Shared styles (legacy)
+│   └── outputs/                # Generated analysis images (gitignored)
 ├── TempData/                  # Cached TEMPO NetCDF files (fallback when object storage not used)
 ├── GroundData/                # Ground sensor / placeholder data
 ├── docs/
-│   └── PROJECT_DOCUMENTATION.md
+│   ├── PROJECT_DOCUMENTATION.md
+│   ├── DATA_LAYER.md
+│   ├── DATA_INGESTION_AND_SCHEDULER_LAYER.md
+│   ├── POLLUTION_INTELLIGENCE_ENGINE_UPES.md
+│   ├── ROUTE_OPTIMIZATION_ENGINE.md
+│   ├── ALERTS_AND_PERSONALIZATION.md
+│   └── PRODUCTION_IMPLEMENTATION_PLAN.md
 ├── requirements.txt
 ├── .env.example               # Documented env vars (commit); .env (gitignored)
 └── README.md
@@ -192,17 +220,34 @@ air-emissions-regional-intelligence-system/
   - **Development (worker + beat in one process):** `celery -A celery_app worker -l info -B`
 - **Dependencies:** `celery[redis]`, `rasterio`, `psycopg2-binary` (sync DB for workers). Database URL is derived for sync use by replacing `postgresql+asyncpg` with `postgresql+psycopg2`.
 
+### 3.10 Pollution Intelligence Engine (UPES)
+
+- **Purpose:** Unified Pollution Exposure Score as a **parallel** layer: aggregate `pollution_grid` to a regular grid, normalize gases, apply weights, environmental modifiers (HDF, WTF, TF), optional EMA, then write hourly GeoTIFFs and JSON logs. Does not replace existing route exposure or analysis.
+- **Config:** See [POLLUTION_INTELLIGENCE_ENGINE_UPES.md](POLLUTION_INTELLIGENCE_ENGINE_UPES.md): `upes_output_base`, `upes_grid_resolution_deg`, `upes_bbox_*`, `upes_traffic_alpha`, `upes_ema_lambda`, `upes_alert_threshold`, `upes_enabled`.
+- **Tasks:** `compute_upes_hourly` runs at minute 15 and after `fetch_tempo_hourly` when ingest succeeds; writes to `outputs/hourly_scores/` and `outputs/logs/`, sets Redis `upes:last_update`.
+- **API:** `GET /api/upes/latest`, `GET /api/upes/grid`, `GET /api/upes/heatmap` (PNG of latest final score).
+
 ---
 
 ## 4. Web Interface and Routes
 
-### 4.1 Pages
+### 4.1 Frontend (Next.js) and legacy pages
+
+The **primary frontend** is the Next.js app in `frontend/`. It runs as a separate app (e.g. `http://localhost:3000`) and calls the FastAPI backend via `NEXT_PUBLIC_API_URL` (e.g. `http://localhost:8000`). CORS is enabled for the Next.js origin. Generated images are loaded from FastAPI `/static/outputs/`.
+
+| Next.js route | Description |
+|---------------|-------------|
+| `/` | Home: Analyze form and Route form. |
+| `/results` | Analysis results (re-fetches via `/api/analyze` using query params). |
+| `/route` | Route safety results (from sessionStorage or re-fetches via `/api/route/analyze`). |
+
+**Legacy (Jinja2):** FastAPI still serves HTML for direct use:
 
 | Route | Method | Description |
 |-------|--------|-------------|
-| `/` | GET | **Index:** Form for location (name or lat/lon), radius, gases (NO2, CH2O, AI, PM, O3), “Include Weather”, “Include Pollutant Movement Prediction”. |
+| `/` | GET | **Index:** Form for location, radius, gases, weather/prediction toggles. |
 | `/analyze` | POST | Runs analysis; returns **result.html** with multi-gas image, per-gas tripanels, alerts, hotspots, weather, predictions, GROQ interpretations, Leaflet map. |
-| `/route` | POST | **Route safety:** Origin/destination (geocoded), gases, grid step. Returns **route.html** with OSRM route(s), exposure scoring, safest route selection, hotspot overlay. |
+| `/route` | POST | **Route safety:** Origin/destination (geocoded), gases, grid step. Optional “Use pollution-optimized route” and mode. Returns **route.html** with OSRM or UPES+OSM route(s), exposure scoring, hotspot overlay. |
 | `/route/alternate` | GET | Same as route analysis with query params; renders route page. |
 
 ### 4.2 API Endpoints
@@ -212,33 +257,46 @@ air-emissions-regional-intelligence-system/
 | `/api/weather` | GET | `lat`, `lon`, `days` — returns WeatherAPI.com response (cached in Redis when configured). |
 | `/api/pollutant_movement` | GET | `lat`, `lon` — next-3h pollutant movement predictions (cached in Redis when configured). |
 | `/api/combined_analysis` | GET | `lat`, `lon`, `radius`, `gases` — combined weather + satellite alerts/hotspots + overall status. |
-| `/api/analyze` | POST | Form: location, latitude, longitude, radius, gases — returns JSON with location, coordinates, gases, overall_status, alerts, hotspots, image_url. |
+| `/api/analyze` | POST | Form: location, latitude, longitude, radius, gases, include_weather, include_pollutant_prediction — returns **full** JSON: location, coords, radius, gases, overall_status, alerts, hotspots, units, image_url, per_gas_images, weather_data, pollutant_predictions, weather_interpretation, prediction_interpretation. Used by Next.js results page. |
+| `/api/route/analyze` | POST | Form: origin, destination, gases, grid_step_km, use_optimized, route_mode — returns JSON: origin_name, dest_name, origin, dest, gases, status_text, routes, hotspots_geojson, grid_step_km, alt_available. Used by Next.js route page. |
 | `/api/hotspots` | GET | `location` or `latitude`/`longitude`, `radius`, `gases` — returns GeoJSON FeatureCollection of hotspots (for maps). |
+| **UPES** | | |
+| `/api/upes/latest` | GET | Returns latest UPES run: timestamp, last_update (Redis), paths, satellite_score, humidity_factor, wind_factor, traffic_factor, final_score. |
+| `/api/upes/grid` | GET | Optional `timestamp` — paths to satellite_score and final_score rasters for that hour (or latest). |
+| `/api/upes/heatmap` | GET | PNG heatmap of latest UPES final score (high-risk contour if threshold set). |
 | **Auth** | | |
 | `/auth/register` | POST | Body: `email`, `password` — create user; returns 201 User or 409 if email exists. |
 | `/auth/login` | POST | Body: `email`, `password` — returns `access_token`, `token_type: bearer`. |
 | `/auth/me` | GET | Header: `Authorization: Bearer <token>` — returns current user (protected). |
+| `/auth/me` | PATCH | Body: `notification_preferences`, `exposure_sensitivity_level` — update current user (protected). |
+| **Alerts** (protected) | | |
+| `/api/alerts` | GET | Query: `route_id`, `alert_type`, `days` (default 7) — list current user's alerts from alert_log. See [ALERTS_AND_PERSONALIZATION.md](ALERTS_AND_PERSONALIZATION.md). |
 | **Saved routes** (all require `Authorization: Bearer <token>`) | | |
 | `/api/saved-routes` | POST | Body: `origin_lat`, `origin_lon`, `dest_lat`, `dest_lon`, optional `activity_type` — create saved route; returns 201. |
 | `/api/saved-routes` | GET | List saved routes for current user. |
 | `/api/saved-routes/{route_id}` | GET | Get one saved route (404 if not found or not owned). |
 | `/api/saved-routes/{route_id}` | DELETE | Delete saved route (204). |
+| **Route optimization** | | |
+| `/api/route/optimized` | GET | `start_lat`, `start_lon`, `end_lat`, `end_lon`, `mode` (commute/jogger/cyclist), optional `alternatives` — returns pollution-optimized routes (UPES + OSM graph). Cached by key with TTL. |
+| `/api/route/optimized` | POST | Body: `origin`, `destination`, optional `mode`, `alternatives` — same response. |
 
 ### 4.3 Frontend Assets
 
-- **Templates:** Jinja2; inline and shared styles; Leaflet (result + route) for maps.
-- **Static:** `style.css`; generated images under `static/outputs/`.
-- **Maps:** OpenStreetMap tiles; result page: single map with overlay; route page: route segments colored by severity, origin/destination markers, hotspot circles.
+- **Next.js (primary):** App in `frontend/`; dark black-and-white theme; Leaflet with CartoDB dark tiles; `NEXT_PUBLIC_API_URL` must point to the FastAPI base URL (e.g. `http://localhost:8000`). Run with `npm run dev` (port 3000 by default).
+- **Legacy:** Jinja2 templates; `style.css`; Leaflet (result + route) for maps.
+- **Static:** Generated images under `static/outputs/`; served by FastAPI; Next.js uses full URLs (`NEXT_PUBLIC_API_URL` + path) to load them.
+- **Maps:** Next.js uses CartoDB dark tiles; result page: center circle, hotspot layer (polling `/api/hotspots` every 10s); route page: route segments colored by severity, origin/destination markers, hotspot circles.
 
 ---
 
 ## 5. Route Safety (Algorithm Summary)
 
 - **Geocoding:** `robust_geocode` — coordinates string, place name, or name + US/California bias.
-- **Routing:** `fetch_osrm_routes(o_lat, o_lon, d_lat, d_lon)` — OSRM public driving API; optional alternatives; returns list of routes with GeoJSON geometry.
-- **Sampling:** `resample_polyline_km(coords, step_km)` — resample route to points roughly every `step_km` km.
-- **Exposure scoring:** `score_route_exposure(samples, gas_data, gas_list, proximity_km, hotspot_circles, ...)` — for each sample point, max severity across gases (and hotspot circles); per-point severity list; “blocked” if any point ≥ `hard_block_threshold` (3). Blocked routes get a large score penalty so the safest route is chosen (unblocked preferred, then by score, then by distance).
-- **Safest route:** Among OSRM alternatives (or single direct line if OSRM fails), the route with lowest exposure score is marked `safest: true` and returned; others are dropped in the current implementation (only safest is sent to template).
+- **Routing (default):** `fetch_osrm_routes(o_lat, o_lon, d_lat, d_lon)` — OSRM public driving API; optional alternatives; returns list of routes with GeoJSON geometry.
+- **Routing (optimized):** When "Use pollution-optimized route" is selected, the **Route Optimization Engine** is used: OSMnx graph for a bbox around origin/destination, UPES raster sampled along edges, mode-specific weights (α, β, γ) and modifiers, Dijkstra (and optional k-shortest) on the weighted graph. See [ROUTE_OPTIMIZATION_ENGINE.md](ROUTE_OPTIMIZATION_ENGINE.md) for inputs, weights, API, and caching.
+- **Sampling:** `resample_polyline_km(coords, step_km)` — resample route to points roughly every `step_km` km (OSRM flow).
+- **Exposure scoring:** `score_route_exposure(samples, gas_data, gas_list, proximity_km, hotspot_circles, ...)` — for each sample point, max severity across gases (and hotspot circles); per-point severity list; “blocked” if any point ≥ `hard_block_threshold` (3). Blocked routes get a large score penalty so the safest route is chosen (unblocked preferred, then by score, then by distance). Used for OSRM-based routes.
+- **Safest route:** Among OSRM alternatives (or single direct line if OSRM fails), the route with lowest exposure score is marked `safest: true` and returned; others are dropped in the current implementation (only safest is sent to template). Optimized routes return one or more routes by cost (exposure + distance + time).
 - **Visualization:** Route drawn as segments colored by severity (green → yellow → orange → red → purple); danger points and hotspots rendered on Leaflet.
 
 ---
@@ -269,6 +327,7 @@ Severity levels: 0 = good, 1 = moderate, 2 = unhealthy, 3 = very unhealthy, 4 = 
 - **HTTP:** requests  
 - **Data layer:** sqlalchemy[asyncio], asyncpg, geoalchemy2, alembic, redis, boto3, pydantic-settings  
 - **Auth:** passlib[bcrypt], python-jose[cryptography], email-validator  
+- **Route optimization:** osmnx, geopandas (OSM graph and spatial operations)
 
 Note: Harmony client is used only in `TEMPO.py` and `tempo_all.py` (optional for data fetch).
 
@@ -282,6 +341,8 @@ Note: Harmony client is used only in `TEMPO.py` and `tempo_all.py` (optional for
   - **JWT:** `SECRET_KEY`, `ALGORITHM` (default HS256), `ACCESS_TOKEN_EXPIRE_MINUTES`.  
   - **Object storage:** `OBJECT_STORAGE_PROVIDER` (minio | s3), `OBJECT_STORAGE_ENDPOINT_URL` (MinIO), `OBJECT_STORAGE_BUCKET`; for S3: `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.  
   - **Feature flag:** `PERSIST_POLLUTION_GRID` (true/false) — persist pollution grid cells to PostGIS after analysis.  
+  - **Route optimization:** `route_optimization_enabled` (default true), `route_osm_buffer_km` (default 3), `route_result_cache_ttl`, `route_graph_cache_ttl` — see [ROUTE_OPTIMIZATION_ENGINE.md](ROUTE_OPTIMIZATION_ENGINE.md).  
+  - **Alerts:** `alerts_enabled`, `alerts_deterioration_base_pct`, `alerts_hazard_threshold`, `alerts_wind_speed_min_kph`, `alerts_wind_angle_deg`, `alerts_n8n_webhook_url` — see [ALERTS_AND_PERSONALIZATION.md](ALERTS_AND_PERSONALIZATION.md).  
   - **Existing:** `WEATHER_API_KEY`, `GROQ_API_KEY` (optional).  
 - **Customization (from README):**
   - `SPATIAL_BOUNDS` / `TIME_CONFIG` — in `TEMPO.py` for Harmony fetch.
@@ -296,8 +357,9 @@ Note: Harmony client is used only in `TEMPO.py` and `tempo_all.py` (optional for
 2. **Web request:** User submits location + parameters → geocode (if needed) → resolve NetCDF paths (DB + object storage or TempData) → `load_and_analyze_for_gases` → optionally persist pollution grid when `PERSIST_POLLUTION_GRID=true` → hotspots + alerts.
 3. **Images:** Multi-gas and tripanel figures written to `static/outputs/`; URLs passed to templates.
 4. **Weather/predictions:** Optional; when enabled, responses are cached in Redis (when configured); GROQ summaries generated when key present.
-5. **Route:** OSRM routes → resample → exposure score with pollution grids + hotspot circles → safest route and GeoJSON hotspots to template.
+5. **Route:** OSRM routes → resample → exposure score with pollution grids + hotspot circles → safest route and GeoJSON hotspots to template. Optional pollution-optimized routing (UPES + OSM).
 6. **Auth:** Register/login issue JWT; saved-routes CRUD use `get_current_user` and store `user_id`.
+7. **Alerts:** Hourly UPES → compute_saved_route_upes_scores (UPES along saved routes, history) → run_alert_pipeline (deterioration, hazard, wind-shift, time-based) → alert_log; optional POST to n8n webhook for Push/Email/In-App.
 
 ---
 
@@ -305,8 +367,9 @@ Note: Harmony client is used only in `TEMPO.py` and `tempo_all.py` (optional for
 
 - **Data availability:** Web app expects existing NetCDF in `TempData/` or in object storage with metadata in `netcdf_files`; no automatic Harmony fetch from the UI.
 - **Ground sensors:** `GroundSensorAnalysis.py` is standalone; not integrated into FastAPI.
-- **Route:** Only the single “safest” route is returned to the route page; alternatives are computed but not shown.
-- **A* avoid pollution:** `a_star_avoid_pollution` exists in `api_server` but is not used in the current route flow (OSRM + exposure scoring is used instead).
+- **Route (OSRM flow):** Only the single “safest” route is returned to the route page; alternatives are computed but not shown. When using the **Route Optimization Engine** (UPES + OSM), one or more routes can be returned (including alternatives when requested).
+- **A* avoid pollution:** `a_star_avoid_pollution` exists in `api_server` but is not used in the current route flow (OSRM + exposure scoring or the new optimization engine is used instead).
 - **DB/Redis/object storage:** All optional; app runs with fallbacks (no DB = no auth/saved-routes/object-storage resolver; no Redis = no cache; no object storage = TempData only). Use `docker-compose up -d` and `alembic upgrade head` for full data layer.
+- **Real-time in-app notifications:** Alerts are currently consumed by polling `GET /api/alerts`. WebSocket push for instant in-app delivery is planned for a future release.
 
 This document reflects the state of the codebase as of the latest review and serves as the single source of truth for architecture, functionality, and utilities.

@@ -109,6 +109,22 @@
                 </div>
             </div>
 
+            <div class="row" style="margin-top:12px;">
+                <div>
+                    <label><input type="checkbox" name="use_optimized" value="true"> Use pollution-optimized route (UPES + OSM)</label>
+                    <div class="hint">Fetches OSM road network and minimizes exposure; slower for first request.</div>
+                </div>
+                <div>
+                    <label for="route_mode">Mode</label>
+                    <select name="route_mode" id="route_mode">
+                        <option value="commute">Commute</option>
+                        <option value="jogger">Jogger</option>
+                        <option value="cyclist">Cyclist</option>
+                    </select>
+                    <div class="hint">Affects road preferences (e.g. cycleways for cyclist).</div>
+                </div>
+            </div>
+
             <button type="submit">Analyze Route</button>
         </form>
 

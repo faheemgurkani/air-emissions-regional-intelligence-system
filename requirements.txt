@@ -12,6 +12,8 @@ requests==2.32.3
 celery[redis]>=5.3
 rasterio
 psycopg2-binary
+osmnx>=1.9
+geopandas
 
 # Data layer
 sqlalchemy[asyncio]>=2.0

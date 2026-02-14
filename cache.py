@@ -31,6 +31,18 @@ def key_route_exposure(origin_lat: float, origin_lon: float, dest_lat: float, de
     return f"route_exposure:{origin_lat}:{origin_lon}:{dest_lat}:{dest_lon}:{h}"
 
 
+def key_route_optimized(
+    start_lat: float,
+    start_lon: float,
+    end_lat: float,
+    end_lon: float,
+    mode: str,
+) -> str:
+    """Cache key for pollution-optimized route result."""
+    m = (mode or "commute").strip().lower()
+    return f"route_opt:{start_lat}:{start_lon}:{end_lat}:{end_lon}:{m}"
+
+
 async def cache_get(redis: Any, key: str) -> Optional[Any]:
     """Return deserialized value if key exists, else None."""
     if redis is None:
