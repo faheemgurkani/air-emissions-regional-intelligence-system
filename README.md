@@ -11,7 +11,6 @@ This project came to life as a result of our participation in the **NASA Space A
 ### Team Members:
 - [Muhammad Faheem](faheemgurkani@gmail.com)
 - Muhammad Zeeshan
-- Amar Rameez
 
 ## Key Features
 
@@ -248,7 +247,6 @@ Follow PEP8 style guidelines and ensure your code is documented.
 ## License
 
 MIT License
-© 2025 Xeeshan85
 
 Developed as part of a research initiative to enhance environmental intelligence and wildfire response using open NASA data.
 

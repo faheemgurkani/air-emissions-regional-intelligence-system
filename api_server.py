@@ -1,13 +1,16 @@
 import os
 import glob
 import datetime as dt
+from contextlib import asynccontextmanager
 from typing import List, Dict, Optional, Tuple, Any
 
 import numpy as np
 import xarray as xr
-from fastapi import FastAPI, Request, Form, Query
+from fastapi import Depends, FastAPI, Request, Form, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut
@@ -21,8 +24,60 @@ from matplotlib.patches import Circle
 import math
 from weather_service import get_weather_data, get_pollutant_movement_prediction
 from groq_service import generate_weather_interpretation, generate_prediction_interpretation
+from cache import get_weather_cached, get_pollutant_movement_cached
+from database.session import get_db
+from database.models import PollutionGrid, SavedRoute, User
+from geoalchemy2 import WKTElement
+from database.schemas import (
+    SavedRouteCreate,
+    SavedRouteResponse,
+    Token,
+    UserLogin,
+    UserRegister,
+    UserResponse,
+)
+from auth import create_access_token, get_current_user, hash_password, verify_password
+from config import settings as app_settings
+from netcdf_resolver import resolve_netcdf_paths_for_gases
 import json
 import requests
+
+
+# -----------------------------
+# Lifespan: DB extensions, Redis, shutdown
+# -----------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: ensure PostGIS extensions exist (best-effort)
+    try:
+        from database.session import async_session_factory, init_db_extensions
+        async with async_session_factory() as session:
+            await init_db_extensions(session)
+    except Exception:
+        pass  # App can run without DB; routes that need DB will fail when used
+    # Redis (optional)
+    redis_client = None
+    try:
+        from config import settings
+        if getattr(settings, "redis_url", None):
+            from redis.asyncio import from_url
+            redis_client = from_url(settings.redis_url)
+            await redis_client.ping()
+    except Exception:
+        pass
+    app.state.redis = redis_client
+    yield
+    # Shutdown: close Redis, dispose DB engine
+    if redis_client is not None:
+        try:
+            await redis_client.aclose()
+        except Exception:
+            pass
+    try:
+        from database.session import async_engine
+        await async_engine.dispose()
+    except Exception:
+        pass
 
 
 # -----------------------------
@@ -37,7 +92,7 @@ os.makedirs(TEMPLATES_DIR, exist_ok=True)
 os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-app = FastAPI(title="TEMPO Pollution Viewer", version="0.1.0")
+app = FastAPI(title="TEMPO Pollution Viewer", version="0.1.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
@@ -45,6 +100,8 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 # -----------------------------
 # Domain configuration
 # -----------------------------
+from pollution_utils import POLLUTION_THRESHOLDS, classify_pollution_level
+
 VARIABLE_NAMES: Dict[str, str] = {
     'NO2': "product/vertical_column_troposphere",
     'CH2O': "product/vertical_column_troposphere",
@@ -59,39 +116,6 @@ UNITS: Dict[str, str] = {
     'AI': "index",
     'PM': "dimensionless",
     'O3': "Dobson Units",
-}
-
-POLLUTION_THRESHOLDS: Dict[str, Dict[str, float]] = {
-    'NO2': {
-        'moderate': 5.0e15,
-        'unhealthy': 1.0e16,
-        'very_unhealthy': 2.0e16,
-        'hazardous': 3.0e16,
-    },
-    'CH2O': {
-        'moderate': 8.0e15,
-        'unhealthy': 1.6e16,
-        'very_unhealthy': 3.2e16,
-        'hazardous': 6.4e16,
-    },
-    'AI': {
-        'moderate': 1.0,
-        'unhealthy': 2.0,
-        'very_unhealthy': 4.0,
-        'hazardous': 7.0,
-    },
-    'PM': {
-        'moderate': 0.2,
-        'unhealthy': 0.5,
-        'very_unhealthy': 1.0,
-        'hazardous': 2.0,
-    },
-    'O3': {
-        'moderate': 220,
-        'unhealthy': 280,
-        'very_unhealthy': 400,
-        'hazardous': 500,
-    },
 }
 
 
@@ -157,22 +181,6 @@ def find_latest_file_for_gas(gas: str) -> Optional[str]:
 
     candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return candidates[0]
-
-
-def classify_pollution_level(value: float, gas: str) -> Tuple[str, int]:
-    if np.isnan(value) or gas not in POLLUTION_THRESHOLDS:
-        return 'no_data', 0
-    thresholds = POLLUTION_THRESHOLDS[gas]
-    if value >= thresholds['hazardous']:
-        return 'hazardous', 4
-    elif value >= thresholds['very_unhealthy']:
-        return 'very_unhealthy', 3
-    elif value >= thresholds['unhealthy']:
-        return 'unhealthy', 2
-    elif value >= thresholds['moderate']:
-        return 'moderate', 1
-    else:
-        return 'good', 0
 
 
 def detect_hotspots(data: np.ndarray, lats: np.ndarray, lons: np.ndarray, gas: str,
@@ -548,14 +556,21 @@ def visualize_tripanel_for_gas(gas: str, datatree: Any, hotspots: List[Dict[str,
     return f"/static/outputs/{out_name}"
 
 
-def load_and_analyze_for_gases(gases: List[str], center_lat: float, center_lon: float,
-                               radius: float, location_name: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+def load_and_analyze_for_gases(
+    gases: List[str],
+    center_lat: float,
+    center_lon: float,
+    radius: float,
+    location_name: str,
+    file_overrides: Optional[Dict[str, str]] = None,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
     gas_data: Dict[str, Any] = {}
     all_hotspots: List[Dict[str, Any]] = []
     all_alerts: List[Dict[str, Any]] = []
+    overrides = file_overrides or {}
 
     for gas in gases:
-        data_file = find_latest_file_for_gas(gas)
+        data_file = overrides.get(gas) or find_latest_file_for_gas(gas)
         if not data_file or not os.path.exists(data_file):
             gas_data[gas] = {'datatree': None, 'data': None, 'hotspots': [], 'alerts': [], 'file': None}
             continue
@@ -590,6 +605,62 @@ def load_and_analyze_for_gases(gases: List[str], center_lat: float, center_lon: 
     return gas_data, all_hotspots, all_alerts
 
 
+async def persist_pollution_grid_cells(
+    session: AsyncSession,
+    gas_data: Dict[str, Any],
+    timestamp: dt.datetime,
+    max_cells_per_gas: int = 5000,
+) -> None:
+    """
+    Optionally persist gridded pollution cells to PostGIS (pollution_grid).
+    Builds a small polygon per grid point and inserts with severity from classify_pollution_level.
+    """
+    for gas, info in gas_data.items():
+        if info.get("data") is None or info.get("datatree") is None:
+            continue
+        da = info["data"]
+        lats_raw = info["datatree"]["geolocation/latitude"].values
+        lons_raw = info["datatree"]["geolocation/longitude"].values
+        if lats_raw.ndim == 1 and lons_raw.ndim == 1:
+            lons_grid, lats_grid = np.meshgrid(lons_raw, lats_raw)
+        else:
+            lats_grid = lats_raw
+            lons_grid = lons_raw
+        vals = da.values
+        if vals.size == 0:
+            continue
+        # Approximate cell half-size in degrees (TEMPO L3 ~ 0.05 deg)
+        dy = 0.025
+        dx = 0.025
+        count = 0
+        for i in range(0, vals.shape[0], max(1, vals.shape[0] // 50)):
+            if count >= max_cells_per_gas:
+                break
+            for j in range(0, vals.shape[1], max(1, vals.shape[1] // 50)):
+                if count >= max_cells_per_gas:
+                    break
+                v = float(vals[i, j])
+                if np.isnan(v):
+                    continue
+                lat_c = float(lats_grid[i, j])
+                lon_c = float(lons_grid[i, j])
+                _, severity = classify_pollution_level(v, gas)
+                # Build polygon (closed ring): minx miny, maxx miny, maxx maxy, minx maxy, minx miny
+                wkt = (
+                    f"POLYGON(({lon_c - dx} {lat_c - dy}, {lon_c + dx} {lat_c - dy}, "
+                    f"{lon_c + dx} {lat_c + dy}, {lon_c - dx} {lat_c + dy}, {lon_c - dx} {lat_c - dy}))"
+                )
+                row = PollutionGrid(
+                    timestamp=timestamp,
+                    gas_type=gas,
+                    geom=WKTElement(wkt, srid=4326),
+                    pollution_value=v,
+                    severity_level=severity,
+                )
+                session.add(row)
+                count += 1
+
+
 # -----------------------------
 # Routes
 # -----------------------------
@@ -604,6 +675,7 @@ async def index(request: Request):
 @app.post("/analyze", response_class=HTMLResponse)
 async def analyze(
     request: Request,
+    db: AsyncSession = Depends(get_db),
     location: Optional[str] = Form(default=""),
     latitude: Optional[str] = Form(default=""),
     longitude: Optional[str] = Form(default=""),
@@ -642,85 +714,105 @@ async def analyze(
     if not gas_list:
         gas_list = ['NO2']
 
-    gas_data, all_hotspots, all_alerts = load_and_analyze_for_gases(gas_list, lat_val, lon_val, radius, location_name)
-    image_url = visualize_multi_gas(gas_data, location_name, lat_val, lon_val, radius)
+    overrides, temp_paths = await resolve_netcdf_paths_for_gases(db, gas_list)
+    try:
+        gas_data, all_hotspots, all_alerts = load_and_analyze_for_gases(
+            gas_list, lat_val, lon_val, radius, location_name, file_overrides=overrides
+        )
+        if getattr(app_settings, "persist_pollution_grid", False):
+            try:
+                await persist_pollution_grid_cells(db, gas_data, dt.datetime.utcnow())
+            except Exception:
+                pass
+        image_url = visualize_multi_gas(gas_data, location_name, lat_val, lon_val, radius)
 
-    # Per-gas tripanel images
-    per_gas_images: List[Dict[str, str]] = []
-    for gas in gas_list:
-        info = gas_data.get(gas)
-        if info and info.get('datatree') is not None:
-            url = visualize_tripanel_for_gas(gas, info['datatree'], all_hotspots, info['alerts'], POLLUTION_THRESHOLDS.get(gas, {}))
-            per_gas_images.append({"gas": gas, "url": url})
+        # Per-gas tripanel images
+        per_gas_images = []
+        for gas in gas_list:
+            info = gas_data.get(gas)
+            if info and info.get('datatree') is not None:
+                url = visualize_tripanel_for_gas(gas, info['datatree'], all_hotspots, info['alerts'], POLLUTION_THRESHOLDS.get(gas, {}))
+                per_gas_images.append({"gas": gas, "url": url})
 
-    severity = max([a['severity'] for a in all_alerts], default=0)
-    severity_to_status = {0: 'Good', 1: 'Moderate', 2: 'Unhealthy for Sensitive Groups', 3: 'Very Unhealthy', 4: 'Hazardous'}
-    overall_status = severity_to_status.get(severity, 'Good')
+        severity = max([a['severity'] for a in all_alerts], default=0)
+        severity_to_status = {0: 'Good', 1: 'Moderate', 2: 'Unhealthy for Sensitive Groups', 3: 'Very Unhealthy', 4: 'Hazardous'}
+        overall_status = severity_to_status.get(severity, 'Good')
 
-    # Enrich top hotspots with reverse geocoded place names (best-effort; skip if unavailable)
-    enriched_hotspots = []
-    for h in all_hotspots[:10]:
-        h_with_place = dict(h)
-        place = reverse_geocode(h_with_place['center_lat'], h_with_place['center_lon'])
-        if place:
-            h_with_place['place'] = place
-        enriched_hotspots.append(h_with_place)
+        # Enrich top hotspots with reverse geocoded place names
+        enriched_hotspots = []
+        for h in all_hotspots[:10]:
+            h_with_place = dict(h)
+            place = reverse_geocode(h_with_place['center_lat'], h_with_place['center_lon'])
+            if place:
+                h_with_place['place'] = place
+            enriched_hotspots.append(h_with_place)
 
-    # Fetch weather data if requested
-    weather_data = None
-    pollutant_predictions = None
-    weather_interpretation = None
-    prediction_interpretation = None
-    if include_weather or include_pollutant_prediction:
-        try:
-            weather_data = get_weather_data(lat_val, lon_val, days=1)
-            if "error" in weather_data:
-                weather_data = None
-            elif weather_data:
-                try:
-                    weather_interpretation = generate_weather_interpretation(weather_data, location_name)
-                except Exception:
-                    weather_interpretation = None
-        except Exception:
-            weather_data = None
-
-    if include_pollutant_prediction and weather_data and "error" not in weather_data:
-        try:
-            pollutant_predictions = get_pollutant_movement_prediction(lat_val, lon_val)
-            if "error" in pollutant_predictions:
-                pollutant_predictions = None
-            else:
-                pollutant_predictions = pollutant_predictions.get("predictions_next_3h", [])
-                if pollutant_predictions:
+        # Fetch weather data if requested
+        weather_data = None
+        pollutant_predictions = None
+        weather_interpretation = None
+        prediction_interpretation = None
+        if include_weather or include_pollutant_prediction:
+            try:
+                redis = getattr(request.app.state, "redis", None)
+                weather_data = await get_weather_cached(redis, lat_val, lon_val, 1, get_weather_data)
+                if "error" in weather_data:
+                    weather_data = None
+                elif weather_data:
                     try:
-                        prediction_interpretation = generate_prediction_interpretation(pollutant_predictions, location_name)
+                        weather_interpretation = generate_weather_interpretation(weather_data, location_name)
                     except Exception:
-                        prediction_interpretation = None
-        except Exception:
-            pollutant_predictions = None
+                        weather_interpretation = None
+            except Exception:
+                weather_data = None
 
-    return templates.TemplateResponse("result.html", {
-        "request": request,
-        "image_url": image_url,
-        "location": location_name,
-        "coords": {"lat": lat_val, "lon": lon_val},
-        "radius": radius,
-        "gases": gas_list,
-        "alerts": all_alerts,
-        "hotspots": enriched_hotspots,
-        "overall_status": overall_status,
-        "units": UNITS,
-        "per_gas_images": per_gas_images,
-        "weather_data": weather_data,
-        "pollutant_predictions": pollutant_predictions,
-        "weather_interpretation": weather_interpretation,
-        "prediction_interpretation": prediction_interpretation,
-    })
+        if include_pollutant_prediction and weather_data and "error" not in weather_data:
+            try:
+                redis = getattr(request.app.state, "redis", None)
+                pollutant_predictions = await get_pollutant_movement_cached(redis, lat_val, lon_val, get_pollutant_movement_prediction)
+                if "error" in pollutant_predictions:
+                    pollutant_predictions = None
+                else:
+                    pollutant_predictions = pollutant_predictions.get("predictions_next_3h", [])
+                    if pollutant_predictions:
+                        try:
+                            prediction_interpretation = generate_prediction_interpretation(pollutant_predictions, location_name)
+                        except Exception:
+                            prediction_interpretation = None
+            except Exception:
+                pollutant_predictions = None
+
+        return templates.TemplateResponse("result.html", {
+            "request": request,
+            "image_url": image_url,
+            "location": location_name,
+            "coords": {"lat": lat_val, "lon": lon_val},
+            "radius": radius,
+            "gases": gas_list,
+            "alerts": all_alerts,
+            "hotspots": enriched_hotspots,
+            "overall_status": overall_status,
+            "units": UNITS,
+            "per_gas_images": per_gas_images,
+            "weather_data": weather_data,
+            "pollutant_predictions": pollutant_predictions,
+            "weather_interpretation": weather_interpretation,
+            "prediction_interpretation": prediction_interpretation,
+        })
+    finally:
+        for p in temp_paths:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
+
+
 # -----------------------------
 # Weather API Endpoints
 # -----------------------------
 @app.get("/api/weather")
 async def api_weather(
+    request: Request,
     lat: float = Query(..., description="Latitude coordinate"),
     lon: float = Query(..., description="Longitude coordinate"),
     days: int = Query(1, description="Number of forecast days")
@@ -729,11 +821,13 @@ async def api_weather(
     Get current weather conditions and forecast data for a specific location.
     Integrates with WeatherAPI.com to provide real-time weather data.
     """
-    return get_weather_data(lat, lon, days)
+    redis = getattr(request.app.state, "redis", None)
+    return await get_weather_cached(redis, lat, lon, days, get_weather_data)
 
 
 @app.get("/api/pollutant_movement")
 async def api_pollutant_movement(
+    request: Request,
     lat: float = Query(..., description="Latitude coordinate"),
     lon: float = Query(..., description="Longitude coordinate")
 ):
@@ -741,11 +835,14 @@ async def api_pollutant_movement(
     Predict air quality movement and concentration changes based on wind patterns.
     Uses weather data to forecast pollutant dispersion for the next 3 hours.
     """
-    return get_pollutant_movement_prediction(lat, lon)
+    redis = getattr(request.app.state, "redis", None)
+    return await get_pollutant_movement_cached(redis, lat, lon, get_pollutant_movement_prediction)
 
 
 @app.get("/api/combined_analysis")
 async def api_combined_analysis(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
     lat: float = Query(..., description="Latitude coordinate"),
     lon: float = Query(..., description="Longitude coordinate"),
     radius: float = Query(0.3, description="Analysis radius in degrees"),
@@ -755,32 +852,41 @@ async def api_combined_analysis(
     Combined analysis providing both satellite pollution data and weather information.
     This endpoint integrates TEMPO satellite data with real-time weather conditions.
     """
-    # Get weather data
-    weather_data = get_weather_data(lat, lon, days=1)
-    # Get satellite pollution data
+    # Get weather data (cached)
+    redis = getattr(request.app.state, "redis", None)
+    weather_data = await get_weather_cached(redis, lat, lon, 1, get_weather_data)
     gas_list = [g.strip().upper() for g in (gases or "NO2").split(',') if g.strip()]
     gas_list = [g for g in gas_list if g in VARIABLE_NAMES]
     if not gas_list:
         gas_list = ['NO2']
     location_name = "Combined Analysis Location"
-    gas_data, all_hotspots, all_alerts = load_and_analyze_for_gases(gas_list, lat, lon, radius, location_name)
-    # Create combined response
-    result = {
-        "location": {
-            "latitude": lat,
-            "longitude": lon,
-            "name": location_name
-        },
-        "weather": weather_data,
-        "satellite_data": {
-            "gases_analyzed": gas_list,
-            "alerts": all_alerts,
-            "hotspots": all_hotspots[:10],  # Top 10 hotspots
-            "overall_status": max([a['severity'] for a in all_alerts], default=0)
-        },
-        "analysis_timestamp": dt.datetime.utcnow().isoformat()
-    }
-    return result
+    overrides, temp_paths = await resolve_netcdf_paths_for_gases(db, gas_list)
+    try:
+        gas_data, all_hotspots, all_alerts = load_and_analyze_for_gases(
+            gas_list, lat, lon, radius, location_name, file_overrides=overrides
+        )
+        result = {
+            "location": {
+                "latitude": lat,
+                "longitude": lon,
+                "name": location_name
+            },
+            "weather": weather_data,
+            "satellite_data": {
+                "gases_analyzed": gas_list,
+                "alerts": all_alerts,
+                "hotspots": all_hotspots[:10],
+                "overall_status": max([a['severity'] for a in all_alerts], default=0)
+            },
+            "analysis_timestamp": dt.datetime.utcnow().isoformat()
+        }
+        return result
+    finally:
+        for p in temp_paths:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -1070,6 +1176,7 @@ def score_route_exposure(samples: List[Tuple[float, float]], gas_data: Dict[str,
 @app.post("/route", response_class=HTMLResponse)
 async def analyze_route(
     request: Request,
+    db: AsyncSession = Depends(get_db),
     origin: str = Form(...),
     destination: str = Form(...),
     gases: Optional[str] = Form(default="NO2,AI"),
@@ -1093,112 +1200,115 @@ async def analyze_route(
     if not gas_list:
         gas_list = ['NO2']
 
-    # Build bounds around route with padding
     pad_deg = 1.0
     lat_min = min(o_lat, d_lat) - pad_deg
     lat_max = max(o_lat, d_lat) + pad_deg
     lon_min = min(o_lon, d_lon) - pad_deg
     lon_max = max(o_lon, d_lon) + pad_deg
 
-    # Load gases using center as mid-point to reuse loader
     center_lat = (o_lat + d_lat) / 2
     center_lon = (o_lon + d_lon) / 2
     radius = max(abs(lat_max - lat_min), abs(lon_max - lon_min)) / 2
-    gas_data, _, _ = load_and_analyze_for_gases(gas_list, center_lat, center_lon, radius, origin_name)
+    overrides, temp_paths = await resolve_netcdf_paths_for_gases(db, gas_list)
+    try:
+        gas_data, _, _ = load_and_analyze_for_gases(
+            gas_list, center_lat, center_lon, radius, origin_name, file_overrides=overrides
+        )
 
-    # Fetch road routes (with alternatives)
-    osrm_routes = fetch_osrm_routes(o_lat, o_lon, d_lat, d_lon, alternatives=True)
-    routes_payload: List[Dict[str, Any]] = []
-    if osrm_routes:
-        hotspot_circles = build_hotspot_circles(gas_data)
-        for idx, rdata in enumerate(osrm_routes):
-            geom = rdata.get('geometry', {})
-            coords = geom.get('coordinates') or []
-            # OSRM returns [lon, lat]; convert to [lat, lon] for Leaflet consumption we use
-            latlon_coords = [[float(c[1]), float(c[0])] for c in coords]
-            samples = resample_polyline_km(latlon_coords, max(5.0, float(grid_step_km)))
+        osrm_routes = fetch_osrm_routes(o_lat, o_lon, d_lat, d_lon, alternatives=True)
+        routes_payload = []
+        if osrm_routes:
+            hotspot_circles = build_hotspot_circles(gas_data)
+            for idx, rdata in enumerate(osrm_routes):
+                geom = rdata.get('geometry', {})
+                coords = geom.get('coordinates') or []
+                latlon_coords = [[float(c[1]), float(c[0])] for c in coords]
+                samples = resample_polyline_km(latlon_coords, max(5.0, float(grid_step_km)))
+                score, danger_pts, per_point_sev, blocked = score_route_exposure(
+                    samples, gas_data, gas_list, proximity_km=10.0, hotspot_circles=hotspot_circles,
+                    hard_block_threshold=3, hotspot_extra_buffer_km=3.0
+                )
+                routes_payload.append({
+                    "name": f"Route {idx+1}",
+                    "distance_km": float(rdata.get('distance', 0.0)) / 1000.0,
+                    "duration_min": float(rdata.get('duration', 0.0)) / 60.0,
+                    "coords": latlon_coords,
+                    "score": score,
+                    "danger": danger_pts,
+                    "severity": per_point_sev,
+                    "blocked": blocked,
+                })
+            if routes_payload:
+                unblocked = [r for r in routes_payload if not r.get('blocked')]
+                candidates = unblocked if unblocked else routes_payload
+                candidates.sort(key=lambda x: (x['score'], x['distance_km']))
+                safest = candidates[0]
+                safest["safest"] = True
+                routes_payload = [safest]
+                status_text = (
+                    f"Safest route selected (exposure score {safest['score']:.0f})" if not safest.get('blocked')
+                    else f"All routes near high pollution; least exposure selected (score {safest['score']:.0f})"
+                )
+            else:
+                status_text = "No road routes available; falling back to straight line"
+        else:
+            samples = sample_line(o_lat, o_lon, d_lat, d_lon, max(5.0, float(grid_step_km)))
+            hotspot_circles = build_hotspot_circles(gas_data)
             score, danger_pts, per_point_sev, blocked = score_route_exposure(
                 samples, gas_data, gas_list, proximity_km=10.0, hotspot_circles=hotspot_circles,
                 hard_block_threshold=3, hotspot_extra_buffer_km=3.0
             )
-            routes_payload.append({
-                "name": f"Route {idx+1}",
-                "distance_km": float(rdata.get('distance', 0.0)) / 1000.0,
-                "duration_min": float(rdata.get('duration', 0.0)) / 60.0,
-                "coords": latlon_coords,
+            routes_payload = [{
+                "name": "Direct",
+                "distance_km": haversine_km(o_lat, o_lon, d_lat, d_lon),
+                "duration_min": None,
+                "coords": [[lat, lon] for lat, lon in samples],
                 "score": score,
                 "danger": danger_pts,
                 "severity": per_point_sev,
+                "safest": True,
                 "blocked": blocked,
-            })
-        # Choose safest (lowest score). If tie, choose shortest distance.
-        if routes_payload:
-            # Prefer unblocked routes first
-            unblocked = [r for r in routes_payload if not r.get('blocked')]
-            candidates = unblocked if unblocked else routes_payload
-            candidates.sort(key=lambda x: (x['score'], x['distance_km']))
-            safest = candidates[0]
-            safest["safest"] = True
-            # Return only the single safest route
-            routes_payload = [safest]
-            status_text = (
-                f"Safest route selected (exposure score {safest['score']:.0f})" if not safest.get('blocked')
-                else f"All routes near high pollution; least exposure selected (score {safest['score']:.0f})"
-            )
-        else:
-            status_text = "No road routes available; falling back to straight line"
-    else:
-        # Fallback: straight line sampling
-        samples = sample_line(o_lat, o_lon, d_lat, d_lon, max(5.0, float(grid_step_km)))
-        hotspot_circles = build_hotspot_circles(gas_data)
-        score, danger_pts, per_point_sev, blocked = score_route_exposure(
-            samples, gas_data, gas_list, proximity_km=10.0, hotspot_circles=hotspot_circles,
-            hard_block_threshold=3, hotspot_extra_buffer_km=3.0
-        )
-        routes_payload = [{
-            "name": "Direct",
-            "distance_km": haversine_km(o_lat, o_lon, d_lat, d_lon),
-            "duration_min": None,
-            "coords": [[lat, lon] for lat, lon in samples],
-            "score": score,
-            "danger": danger_pts,
-            "severity": per_point_sev,
-            "safest": True,
-            "blocked": blocked,
-        }]
-        status_text = "Road routing unavailable; evaluated direct path"
+            }]
+            status_text = "Road routing unavailable; evaluated direct path"
 
-    # Prepare hotspots overlay (limited for performance)
-    hotspots_geojson = gather_hotspots_geojson(gas_data, limit=50)
+        hotspots_geojson = gather_hotspots_geojson(gas_data, limit=50)
 
-    return templates.TemplateResponse("route.html", {
-        "request": request,
-        "origin_name": origin_name,
-        "dest_name": dest_name,
-        "origin": {"lat": o_lat, "lon": o_lon},
-        "dest": {"lat": d_lat, "lon": d_lon},
-        "gases": gas_list,
-        "status_text": status_text,
-        "routes": json.dumps(routes_payload),
-        "hotspots_geojson": json.dumps(hotspots_geojson),
-        "alt_available": False,
-        "grid_step_km": grid_step_km,
-    })
+        return templates.TemplateResponse("route.html", {
+            "request": request,
+            "origin_name": origin_name,
+            "dest_name": dest_name,
+            "origin": {"lat": o_lat, "lon": o_lon},
+            "dest": {"lat": d_lat, "lon": d_lon},
+            "gases": gas_list,
+            "status_text": status_text,
+            "routes": json.dumps(routes_payload),
+            "hotspots_geojson": json.dumps(hotspots_geojson),
+            "alt_available": False,
+            "grid_step_km": grid_step_km,
+        })
+    finally:
+        for p in temp_paths:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
 
 
 @app.get("/route/alternate", response_class=HTMLResponse)
 async def route_alternate(
     request: Request,
+    db: AsyncSession = Depends(get_db),
     origin: str = Query(...),
     destination: str = Query(...),
     gases: str = Query(default="NO2,AI"),
     grid_step_km: int = Query(default=20),
 ):
-    return await analyze_route(request, origin, destination, gases, grid_step_km)
+    return await analyze_route(request, db, origin, destination, gases, grid_step_km)
 
 
 @app.post("/api/analyze")
 async def analyze_api(
+    db: AsyncSession = Depends(get_db),
     location: Optional[str] = Form(default=""),
     latitude: Optional[str] = Form(default=""),
     longitude: Optional[str] = Form(default=""),
@@ -1206,15 +1316,14 @@ async def analyze_api(
     gases: Optional[str] = Form(default="NO2"),
 ):
     location_name = location.strip() or "Custom Location"
-    lat_val: Optional[float] = None
-    lon_val: Optional[float] = None
+    lat_val = None
+    lon_val = None
     if latitude and longitude:
         try:
             lat_val = float(latitude)
             lon_val = float(longitude)
         except Exception:
-            lat_val = None
-            lon_val = None
+            pass
     if (lat_val is None or lon_val is None) and location_name:
         coords = geocode_location(location_name)
         if coords:
@@ -1227,17 +1336,27 @@ async def analyze_api(
     if not gas_list:
         gas_list = ['NO2']
 
-    gas_data, all_hotspots, all_alerts = load_and_analyze_for_gases(gas_list, lat_val, lon_val, radius, location_name)
-    image_url = visualize_multi_gas(gas_data, location_name, lat_val, lon_val, radius)
-    return {
-        "location": location_name,
-        "coordinates": {"latitude": lat_val, "longitude": lon_val},
-        "gases": gas_list,
-        "overall_status": max([a['severity'] for a in all_alerts], default=0),
-        "alerts": all_alerts,
-        "hotspots": all_hotspots,
-        "image_url": image_url,
-    }
+    overrides, temp_paths = await resolve_netcdf_paths_for_gases(db, gas_list)
+    try:
+        gas_data, all_hotspots, all_alerts = load_and_analyze_for_gases(
+            gas_list, lat_val, lon_val, radius, location_name, file_overrides=overrides
+        )
+        image_url = visualize_multi_gas(gas_data, location_name, lat_val, lon_val, radius)
+        return {
+            "location": location_name,
+            "coordinates": {"latitude": lat_val, "longitude": lon_val},
+            "gases": gas_list,
+            "overall_status": max([a['severity'] for a in all_alerts], default=0),
+            "alerts": all_alerts,
+            "hotspots": all_hotspots,
+            "image_url": image_url,
+        }
+    finally:
+        for p in temp_paths:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
 
 
 def hotspots_to_geojson(hotspots: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1263,6 +1382,7 @@ def hotspots_to_geojson(hotspots: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 @app.get("/api/hotspots")
 async def api_hotspots(
+    db: AsyncSession = Depends(get_db),
     location: Optional[str] = Query(default=""),
     latitude: Optional[float] = Query(default=None),
     longitude: Optional[float] = Query(default=None),
@@ -1284,9 +1404,110 @@ async def api_hotspots(
     if not gas_list:
         gas_list = ['NO2']
 
-    gas_data, _, _ = load_and_analyze_for_gases(gas_list, lat_val, lon_val, radius, location_name)
-    # Reuse same hotspot circle computation as routing map
-    return gather_hotspots_geojson(gas_data, limit=200)
+    overrides, temp_paths = await resolve_netcdf_paths_for_gases(db, gas_list)
+    try:
+        gas_data, _, _ = load_and_analyze_for_gases(
+            gas_list, lat_val, lon_val, radius, location_name, file_overrides=overrides
+        )
+        return gather_hotspots_geojson(gas_data, limit=200)
+    finally:
+        for p in temp_paths:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
+
+
+# -----------------------------
+# Auth and saved routes
+# -----------------------------
+@app.post("/auth/register", response_class=JSONResponse)
+async def register(body: UserRegister, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.email == body.email))
+    if result.scalar_one_or_none() is not None:
+        return JSONResponse({"detail": "Email already registered"}, status_code=409)
+    user = User(
+        email=body.email,
+        password_hash=hash_password(body.password),
+    )
+    db.add(user)
+    await db.flush()
+    await db.refresh(user)
+    return JSONResponse(
+        status_code=201,
+        content=UserResponse.model_validate(user).model_dump(mode="json"),
+    )
+
+
+@app.post("/auth/login", response_class=JSONResponse)
+async def login(body: UserLogin, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.email == body.email))
+    user = result.scalar_one_or_none()
+    if user is None or not verify_password(body.password, user.password_hash):
+        return JSONResponse({"detail": "Invalid email or password"}, status_code=401)
+    return Token(access_token=create_access_token(user.id))
+
+
+@app.get("/auth/me", response_class=JSONResponse)
+async def auth_me(current_user: User = Depends(get_current_user)):
+    return UserResponse.model_validate(current_user)
+
+
+@app.post("/api/saved-routes", response_class=JSONResponse)
+async def create_saved_route(
+    body: SavedRouteCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    route = SavedRoute(
+        user_id=current_user.id,
+        origin_lat=body.origin_lat,
+        origin_lon=body.origin_lon,
+        dest_lat=body.dest_lat,
+        dest_lon=body.dest_lon,
+        activity_type=body.activity_type,
+    )
+    db.add(route)
+    await db.flush()
+    await db.refresh(route)
+    return JSONResponse(status_code=201, content=SavedRouteResponse.model_validate(route).model_dump(mode="json"))
+
+
+@app.get("/api/saved-routes")
+async def list_saved_routes(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(SavedRoute).where(SavedRoute.user_id == current_user.id).order_by(SavedRoute.created_at.desc()))
+    routes = result.scalars().all()
+    return [SavedRouteResponse.model_validate(r).model_dump(mode="json") for r in routes]
+
+
+@app.get("/api/saved-routes/{route_id}")
+async def get_saved_route(
+    route_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(SavedRoute).where(SavedRoute.id == route_id, SavedRoute.user_id == current_user.id))
+    route = result.scalar_one_or_none()
+    if route is None:
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    return SavedRouteResponse.model_validate(route).model_dump(mode="json")
+
+
+@app.delete("/api/saved-routes/{route_id}")
+async def delete_saved_route(
+    route_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(SavedRoute).where(SavedRoute.id == route_id, SavedRoute.user_id == current_user.id))
+    route = result.scalar_one_or_none()
+    if route is None:
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    await db.delete(route)
+    return Response(status_code=204)
 
 
 # Dev server hint:
