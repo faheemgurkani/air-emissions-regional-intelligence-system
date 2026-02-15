@@ -11,6 +11,7 @@ requests==2.32.3
 celery[redis]>=5.3
 rasterio
 psycopg2-binary
+networkx
 osmnx>=1.9
 geopandas
 

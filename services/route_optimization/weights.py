@@ -26,9 +26,10 @@ def mode_modifier(edge_data: Dict[str, Any], mode: str) -> float:
     > 1 = penalty, < 1 = bonus, 1 = neutral.
     """
     mode = (mode or "commute").lower().strip()
-    highway = (edge_data.get("highway") or "").lower()
+    highway = edge_data.get("highway") or ""
     if isinstance(highway, list):
         highway = highway[0] if highway else ""
+    highway = str(highway).lower()
     leisure = (edge_data.get("leisure") or "").lower()
     cycleway = edge_data.get("cycleway") or edge_data.get("cycleway:left") or edge_data.get("cycleway:right")
     if cycleway:

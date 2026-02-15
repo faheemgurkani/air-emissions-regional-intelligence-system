@@ -199,4 +199,14 @@ In `config.py` (and `.env` overrides):
 | API | `api_server.py`: GET/POST `/api/route/optimized`; `analyze_route` with `use_optimized` and `route_mode` |
 | Cache | `cache.py`: `key_route_optimized` |
 
+---
+
+## 11. Testing and compatibility with data / ingestion layers
+
+- **Unit tests** (see `tests/`): `test_route_optimization_weights.py`, `test_route_optimization_upes_sampling.py`, `test_route_optimization_pathfinding.py`, `test_route_optimization_graph_builder.py`, `test_route_optimization_api.py`. They cover weights and mode modifiers, UPES sampling along lines, pathfinding and geometry aggregation, graph builder (including `get_latest_upes_raster_path` from UPES storage), and cache key compatibility with the data layer.
+- **Verification report:** [ROUTE_OPTIMIZATION_ENGINE_VERIFICATION.md](ROUTE_OPTIMIZATION_ENGINE_VERIFICATION.md) maps each requirement in this document to implementation and tests, and confirms conformance with the Data Layer and Data Ingestion and Scheduler Layer.
+- **Data layer:** The route result cache uses `key_route_optimized(start_lat, start_lon, end_lat, end_lon, mode)` in `cache.py`; Redis is optional (see [DATA_LAYER.md](DATA_LAYER.md)).
+- **Ingestion layer:** UPES rasters (`final_score_*.tif`) are produced by the Celery UPES pipeline (see [DATA_INGESTION_AND_SCHEDULER_LAYER.md](DATA_INGESTION_AND_SCHEDULER_LAYER.md)). The route engine uses `get_latest_upes_raster_path()` from `services/route_optimization/graph_builder.py`, which reads from `upes_output_base()/hourly_scores/final_score/`. If no raster exists, edges use the default UPES fallback (0.5).
+- Run route optimization tests: `pytest tests/test_route_optimization_*.py -v`. Some tests skip when `osmnx` or `api_server` (full app) are not available.
+
 Existing OSRM-based routing and `score_route_exposure` remain unchanged; the optimization engine is an additional path used by the new API and the route form when “Use pollution-optimized route” is selected.

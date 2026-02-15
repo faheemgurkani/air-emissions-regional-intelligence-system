@@ -2,6 +2,8 @@
 
 This document describes the **Alerts & Personalization Engine**: inputs from UPES and saved-route exposure, sensitivity-scaled alert logic, persistence, and n8n webhook dispatch for multi-channel notifications.
 
+**Implementation verification and n8n workflow setup:** [ALERTS_AND_PERSONALIZATION_VERIFICATION.md](ALERTS_AND_PERSONALIZATION_VERIFICATION.md).
+
 ---
 
 ## 1. Overview

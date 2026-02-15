@@ -18,6 +18,18 @@ Tests for the **DATA_LAYER** and backend, aligned with [docs/DATA_LAYER.md](../d
 | | `test_pollution_utils_ingestion.py` | POLLUTION_THRESHOLDS for all gases, `classify_pollution_level` severity 0–4 |
 | | `test_pollution_tasks.py` | Bbox env (TEMPO_BBOX_*), sync DB URL (asyncpg → psycopg2) |
 | | `test_data_ingestion_integration.py` | Integration: token with .env, URL structure, optional live fetch when `INGESTION_LIVE=1` |
+| **Route optimization engine** | `test_route_optimization_weights.py` | MODE_WEIGHTS (α,β,γ), `get_weights`, `mode_modifier` (jogger/cyclist/commute penalties and bonuses) |
+| | `test_route_optimization_upes_sampling.py` | `_resample_line`, `sample_upes_along_line` (fallback when no raster), `sample_upes_along_line_mean_max` |
+| | `test_route_optimization_pathfinding.py` | `_route_geometry_and_metrics`, `shortest_path_optimized`, `k_shortest_paths` (in-memory graph; osmnx-nearest_nodes tests skip if osmnx not installed) |
+| | `test_route_optimization_graph_builder.py` | `get_latest_upes_raster_path`, `_edge_geometry_to_coords`, `_speed_kph`, `build_weighted_graph` (OSM mocked; tests skip if osmnx not installed) |
+| | `test_route_optimization_api.py` | Cache key `key_route_optimized` (DATA_LAYER compatibility); GET/POST `/api/route/optimized` (disabled 503, params, response shape) — skip if api_server/httpx not available |
+| **Alerts & Personalization** | `test_alerts_constants.py` | Sensitivity scale/label (1–5 → Normal/Sensitive/Asthmatic) per [ALERTS_AND_PERSONALIZATION.md](../docs/ALERTS_AND_PERSONALIZATION.md) |
+| | `test_alerts_detection.py` | Route deterioration, hazard, wind shift, time-based triggers; `run_detection` |
+| | `test_alerts_route_exposure.py` | UPES along saved route (integration with `get_latest_upes_raster_path`, `sample_upes_along_line_mean_max`) |
+| | `test_alert_tasks.py` | `_channels_from_preferences`, compute_saved_route_upes_scores (skip when no raster), run_alert_pipeline (skip when disabled), webhook payload shape |
+| | `test_alerts_api.py` | GET /api/alerts (401 without auth; 200 with auth + mock DB); PATCH /auth/me body (UserUpdate schema) |
+
+Route optimization tests depend on the **data layer** (Redis cache key per [DATA_LAYER.md](../docs/DATA_LAYER.md)) and on **UPES output** produced by the ingestion/scheduler layer ([DATA_INGESTION_AND_SCHEDULER_LAYER.md](../docs/DATA_INGESTION_AND_SCHEDULER_LAYER.md)). The engine reads the latest `final_score_*.tif` from `upes_output_base()/hourly_scores/final_score/`.
 
 ## Data ingestion validation script
 

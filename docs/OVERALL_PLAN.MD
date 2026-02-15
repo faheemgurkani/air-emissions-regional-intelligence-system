@@ -141,6 +141,8 @@ This makes your system predictive rather than static.
 
 # 3️⃣ Pollution Intelligence Engine (Core Upgrade)
 
+*Implementation and test verification for §3 and §4 (through Route Optimization): [OVERALL_PLAN_VERIFICATION_142_249.md](OVERALL_PLAN_VERIFICATION_142_249.md).*
+
 You currently have threshold classification.
 
 We upgrade this to:

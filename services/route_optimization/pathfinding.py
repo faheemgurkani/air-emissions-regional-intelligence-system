@@ -103,6 +103,19 @@ def shortest_path_optimized(
     }
 
 
+def _to_simple_digraph(G: Any) -> Any:
+    """Convert MultiDiGraph to DiGraph by keeping minimum-weight edge per (u,v). shortest_simple_paths requires a simple graph."""
+    if not getattr(G, "is_multigraph", lambda: False) or not G.is_multigraph():
+        return G
+    H = nx.DiGraph()
+    H.add_nodes_from(G.nodes(data=True))
+    for u, v, key, data in G.edges(keys=True, data=True):
+        w = data.get("weight", 0)
+        if not H.has_edge(u, v) or H[u][v].get("weight", float("inf")) > w:
+            H.add_edge(u, v, **data)
+    return H
+
+
 def k_shortest_paths(
     G: Any,
     origin_lat: float,
@@ -121,8 +134,9 @@ def k_shortest_paths(
     if src is None or tgt is None:
         return []
     routes = []
+    G_simple = _to_simple_digraph(G)
     try:
-        for path in nx.shortest_simple_paths(G, src, tgt, weight="weight"):
+        for path in nx.shortest_simple_paths(G_simple, src, tgt, weight="weight"):
             if len(path) < 2:
                 continue
             coords, exposure, distance_km, time_h, cost = _route_geometry_and_metrics(G, path)
